@@ -4,6 +4,7 @@ import numpy as np
 import warnings
 import io
 import base64
+import requests
 from datetime import datetime, timedelta
 
 from sklearn.model_selection import train_test_split
@@ -327,6 +328,21 @@ html, body, [class*="css"] {
     letter-spacing: 3px;
     text-transform: uppercase;
 }
+
+.n8n-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255,100,0,0.12);
+    border: 1px solid rgba(255,100,0,0.3);
+    border-radius: 20px;
+    padding: 6px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: #ff6400;
+    letter-spacing: 2px;
+    margin-top: 8px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -370,13 +386,36 @@ def axis3d(label):
     )
 
 # ══════════════════════════════════════════════════════════════
+#  N8N WEBHOOK FUNCTION
+# ══════════════════════════════════════════════════════════════
+def send_alert_to_n8n(state, prob, live_health, rul_val, v, i, temp, vib):
+    try:
+        webhook_url = "https://chaudhary0022.app.n8n.cloud/webhook/motormind-alert"
+        payload = {
+            "prediction": state,
+            "confidence": round(float(prob), 1),
+            "health_score": float(live_health),
+            "rul_hours": float(rul_val),
+            "voltage": v,
+            "current": i,
+            "temperature": temp,
+            "vibration": vib,
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "severity": "CRITICAL" if state.lower() == "high" else "WARNING"
+        }
+        response = requests.post(webhook_url, json=payload, timeout=5)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+# ══════════════════════════════════════════════════════════════
 #  SESSION STATE — MAINTENANCE LOG
 # ══════════════════════════════════════════════════════════════
 if 'maint_log' not in st.session_state:
     st.session_state.maint_log = []
 
 # ══════════════════════════════════════════════════════════════
-#  HEADER  — PREDICT X team name added
+#  HEADER
 # ══════════════════════════════════════════════════════════════
 st.markdown("""
 <div class="main-header">
@@ -384,10 +423,13 @@ st.markdown("""
         <div class="brand-name">Motor<span>Mind</span> AI</div>
         <div class="brand-sub">Predictive Maintenance &nbsp;·&nbsp; Fault Detection &nbsp;·&nbsp; Real-Time Analytics</div>
         <div class="team-badge">⚡ TEAM &nbsp; PREDICT X</div>
+        <div class="n8n-badge">⚙️ POWERED BY &nbsp; n8n AUTOMATION</div>
     </div>
-    <div class="live-badge">
-        <span class="live-dot"></span>
-        SYSTEM ACTIVE
+    <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end;">
+        <div class="live-badge">
+            <span class="live-dot"></span>
+            SYSTEM ACTIVE
+        </div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -419,7 +461,20 @@ with st.sidebar:
     ◆ Maintenance Log System<br>
     ◆ PDF Report Export<br>
     ◆ Multi-Class Confidence<br>
-    ◆ 3D Feature Space Viewer
+    ◆ 3D Feature Space Viewer<br>
+    ◆ n8n Alert Automation
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("""<div style='height:1px;background:rgba(99,102,241,0.15);margin:1rem 0;'></div>""",
+                unsafe_allow_html=True)
+    st.markdown("""
+    <div style='background:rgba(255,100,0,0.08);border:1px solid rgba(255,100,0,0.25);
+    border-radius:8px;padding:0.7rem;font-family:JetBrains Mono,monospace;
+    font-size:0.65rem;color:#ff6400;letter-spacing:1.5px;text-transform:uppercase;'>
+    ⚙️ n8n Automation Active<br>
+    <span style="color:#4b5563;font-size:0.6rem;">
+    Critical faults trigger<br>automatic email alerts
+    </span>
     </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
@@ -943,13 +998,33 @@ with tab3:
             yaxis=make_axis(range=[0,115], title='Probability (%)'))
         st.plotly_chart(fig_pb, use_container_width=True)
 
+        # ══════════════════════════════════════════════════════
+        #  N8N ALERT — AUTOMATIC EMAIL TRIGGER
+        # ══════════════════════════════════════════════════════
+        if state.lower() in ['high', 'moderate']:
+            alert_sent = send_alert_to_n8n(state, prob, live_health, rul_val, v, i, temp, vib)
+            if alert_sent:
+                st.markdown("""
+                <div style='background:rgba(255,100,0,0.08);border:1px solid rgba(255,100,0,0.3);
+                border-radius:8px;padding:0.7rem 1rem;font-family:JetBrains Mono,monospace;
+                font-size:0.72rem;color:#ff6400;letter-spacing:1px;margin-top:0.5rem;'>
+                ⚙️ n8n ALERT TRIGGERED — Email notification sent automatically!
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div style='background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);
+                border-radius:8px;padding:0.7rem 1rem;font-family:JetBrains Mono,monospace;
+                font-size:0.72rem;color:#a5b4fc;letter-spacing:1px;margin-top:0.5rem;'>
+                ⚙️ n8n webhook — Check n8n workflow is active
+                </div>""", unsafe_allow_html=True)
+
         st.session_state.maint_log.append({
             'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'Voltage': v, 'Current': i, 'Temperature': temp, 'Vibration': vib,
             'Prediction': state, 'Confidence': f'{prob:.1f}%',
             'Health Score': live_health, 'RUL (h)': rul_val
         })
-        st.success("Result saved to Maintenance Log.")
+        st.success("✅ Result saved to Maintenance Log.")
 
 # ══════════════════════════════════════════════════════════════
 #  TAB 4 — MAINTENANCE LOG
@@ -977,7 +1052,6 @@ with tab4:
     if st.session_state.maint_log:
         log_df = pd.DataFrame(st.session_state.maint_log)
 
-        # ── FIX: applymap → map (pandas >= 2.1 compatibility) ──
         def highlight_prediction(val):
             v = str(val).lower()
             if v in ['high', 'critical failure', 'emergency']:
@@ -1118,6 +1192,6 @@ st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 st.markdown("""
 <div class="footer-bar">
 MotorMind AI &nbsp;·&nbsp; Team PREDICT X &nbsp;·&nbsp; Random Forest + Gradient Boosting &nbsp;·&nbsp;
-Built with Streamlit & Plotly &nbsp;·&nbsp; Space Grotesk + JetBrains Mono
+Built with Streamlit & Plotly &nbsp;·&nbsp; Automated by n8n &nbsp;·&nbsp; Space Grotesk + JetBrains Mono
 </div>
 """, unsafe_allow_html=True)
