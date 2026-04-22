@@ -5,7 +5,6 @@ import warnings
 import io
 import base64
 import requests
-import anthropic
 from datetime import datetime, timedelta
 
 from sklearn.model_selection import train_test_split
@@ -461,8 +460,6 @@ def send_alert_to_n8n(state, prob, live_health, rul_val, v, i, temp, vib):
 # ══════════════════════════════════════════════════════════════
 if 'maint_log' not in st.session_state:
     st.session_state.maint_log = []
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
 
 # ══════════════════════════════════════════════════════════════
 #  HEADER
@@ -512,8 +509,7 @@ with st.sidebar:
     ◆ PDF Report Export<br>
     ◆ Multi-Class Confidence<br>
     ◆ 3D Feature Space Viewer<br>
-    ◆ n8n Alert Automation<br>
-    ◆ AI Engineer Chatbot
+    ◆ n8n Alert Automation
     </div>""", unsafe_allow_html=True)
 
     st.markdown("""<div style='height:1px;background:rgba(99,102,241,0.15);margin:1rem 0;'></div>""",
@@ -650,13 +646,12 @@ st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════
 #  TABS
 # ══════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "  📡  Sensor Analytics  ",
     "  🤖  Model Diagnostics  ",
     "  ⚡  Live Prediction  ",
     "  📋  Maintenance Log  ",
     "  📈  Forecast & Trends  ",
-    "  💬  AI Chat  ",
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -1236,147 +1231,6 @@ with tab5:
     stats = df[['Voltage','Current','Temperature','Vibration']].describe().round(3)
     st.dataframe(stats.style.format(precision=3), use_container_width=True)
 
-
-# ══════════════════════════════════════════════════════════════
-#  TAB 6 — AI ENGINEER CHATBOT
-# ══════════════════════════════════════════════════════════════
-with tab6:
-    st.markdown('<div class="section-title">AI Engineer Assistant — Powered by Claude</div>', unsafe_allow_html=True)
-    st.markdown("""
-    <div style='font-family:Space Grotesk,sans-serif;font-size:0.85rem;
-    color:#4b5563;margin-bottom:1rem;line-height:1.6;'>
-    Ask anything about your motor — health status, fault reasons, maintenance tips.
-    AI answers based on your <b style='color:#6366f1'>live sensor data</b>.
-    </div>""", unsafe_allow_html=True)
-
-    api_key = st.text_input(
-        "ANTHROPIC API KEY",
-        type="password",
-        placeholder="sk-ant-api03-...",
-        key="api_key_input"
-    )
-
-    st.markdown('<div class="section-title">Quick Questions</div>', unsafe_allow_html=True)
-    qcol1, qcol2, qcol3, qcol4 = st.columns(4)
-    quick_q = None
-    with qcol1:
-        if st.button("Motor health status?", use_container_width=True, key="q1"):
-            quick_q = "What is the current motor health status and what does it mean?"
-    with qcol2:
-        if st.button("Why is it failing?", use_container_width=True, key="q2"):
-            quick_q = "Why is this motor showing fault? What is the root cause?"
-    with qcol3:
-        if st.button("How long will it last?", use_container_width=True, key="q3"):
-            quick_q = "How many hours does this motor have left and what should I do?"
-    with qcol4:
-        if st.button("What action needed?", use_container_width=True, key="q4"):
-            quick_q = "What immediate maintenance action should the engineer take right now?"
-
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-    if st.session_state.chat_history:
-        chat_html = '<div class="chat-container">'
-        for msg in st.session_state.chat_history:
-            if msg['role'] == 'user':
-                chat_html += '<div class="chat-label-user">YOU</div>'
-                chat_html += '<div class="chat-msg-user">' + msg["content"] + '</div>'
-            else:
-                chat_html += '<div class="chat-label-ai">MOTORMIND AI</div>'
-                chat_html += '<div class="chat-msg-ai">' + msg["content"].replace("\n", "<br>") + '</div>'
-        chat_html += '</div>'
-        st.markdown(chat_html, unsafe_allow_html=True)
-
-    user_input = st.text_input(
-        "Ask the AI Engineer...",
-        placeholder="e.g. Why is temperature so high? Should I stop the motor?",
-        key="chat_input",
-        label_visibility="collapsed"
-    )
-
-    send_col1, send_col2 = st.columns([4, 1])
-    with send_col2:
-        send_btn = st.button("SEND", use_container_width=True, key="send_chat")
-    with send_col1:
-        if st.button("CLEAR CHAT", use_container_width=True, key="clear_chat"):
-            st.session_state.chat_history = []
-            st.rerun()
-
-    final_question = quick_q or (user_input if send_btn and user_input else None)
-
-    if final_question:
-        if not api_key:
-            st.error("Please enter your Anthropic API key above!")
-        else:
-            last_log = st.session_state.maint_log[-1] if st.session_state.maint_log else None
-
-            if last_log:
-                sensor_context = (
-                    "Current Motor Sensor Data (Live Reading):\n"
-                    "- Voltage      : " + str(last_log.get("Voltage", "N/A")) + " V\n"
-                    "- Current      : " + str(last_log.get("Current", "N/A")) + " A\n"
-                    "- Temperature  : " + str(last_log.get("Temperature", "N/A")) + " C\n"
-                    "- Vibration    : " + str(last_log.get("Vibration", "N/A")) + " mm/s\n"
-                    "- Health Score : " + str(last_log.get("Health Score", "N/A")) + "/100\n"
-                    "- Fault State  : " + str(last_log.get("Prediction", "N/A")) + "\n"
-                    "- Confidence   : " + str(last_log.get("Confidence", "N/A")) + "\n"
-                    "- RUL          : " + str(last_log.get("RUL (h)", "N/A")) + " hours remaining\n"
-                    "- Timestamp    : " + str(last_log.get("Timestamp", "N/A"))
-                )
-            else:
-                sensor_context = (
-                    "No live prediction yet. Dataset overview:\n"
-                    "- Total Samples   : " + str(len(df)) + "\n"
-                    "- Fault Classes   : " + str(list(class_names)) + "\n"
-                    "- Model Accuracy  : " + str(accuracy) + "%\n"
-                    "- Avg Health Score: " + str(avg_health) + "/100\n"
-                    "- Avg RUL         : " + str(int(avg_rul)) + " hours\n"
-                    "- Avg Temperature : " + str(round(df["Temperature"].mean(), 1)) + " C\n"
-                    "- Avg Vibration   : " + str(round(df["Vibration"].mean(), 1)) + " mm/s"
-                )
-
-            system_prompt = (
-                "You are MotorMind AI - an expert industrial motor engineer assistant for Team PREDICT X Predictive Maintenance System.\n\n"
-                + sensor_context +
-                "\n\nYour job:\n"
-                "- Answer questions about motor health, faults, and maintenance\n"
-                "- Give specific data-driven answers based on the sensor readings above\n"
-                "- Be concise but thorough - max 150 words per response\n"
-                "- Give clear actionable recommendations\n"
-                "- If health score < 40: strongly recommend immediate shutdown\n"
-                "- If health score 40-70: recommend maintenance within 48h\n"
-                "- If health score > 70: confirm normal operation\n"
-                "- Always reference actual numbers from sensor data\n"
-                "- Respond in same language as the engineer (English or Urdu)"
-            )
-
-            try:
-                client = anthropic.Anthropic(api_key=api_key)
-                messages = []
-                for msg in st.session_state.chat_history[-6:]:
-                    messages.append({"role": msg["role"], "content": msg["content"]})
-                messages.append({"role": "user", "content": final_question})
-
-                with st.spinner("MotorMind AI thinking..."):
-                    response = client.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=300,
-                        system=system_prompt,
-                        messages=messages
-                    )
-                    ai_reply = response.content[0].text
-
-                st.session_state.chat_history.append({"role": "user", "content": final_question})
-                st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
-                st.rerun()
-
-            except Exception as e:
-                st.error("API Error: " + str(e))
-
-    st.markdown("""
-    <div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
-    color:#374151;letter-spacing:1.5px;text-align:center;margin-top:1rem;'>
-    TIP: Run a fault analysis in Live Prediction tab first — then ask questions here for best results
-    </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
 #  FOOTER
