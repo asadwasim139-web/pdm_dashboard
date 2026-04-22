@@ -812,8 +812,7 @@ with tab2:
     rpt    = classification_report(y_test, y_pred, target_names=class_names, output_dict=True)
     rpt_df = pd.DataFrame(rpt).T.round(3)
     st.dataframe(
-        rpt_df.style.background_gradient(cmap='Greens', subset=['precision','recall','f1-score'])
-                    .format(precision=3),
+        rpt_df.style.format(precision=3),
         use_container_width=True)
 
     st.markdown('<div class="section-title">3D Classification Feature Space</div>',
@@ -1183,7 +1182,7 @@ with tab5:
 
     st.markdown('<div class="section-title">Statistical Summary</div>', unsafe_allow_html=True)
     stats = df[['Voltage','Current','Temperature','Vibration']].describe().round(3)
-    st.dataframe(stats.style.background_gradient(cmap='Blues', axis=1), use_container_width=True)
+    st.dataframe(stats.style.format(precision=3), use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════
 #  FOOTER
