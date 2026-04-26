@@ -1111,38 +1111,111 @@ with tab3:
         })
         st.success("✅ Result saved to Maintenance Log.")
 
-        # AUTO-REMEDIATION TRIGGER
-        if state.lower() in ['high', 'moderate']:
-            target_speed = 30 if state.lower() == 'high' else 60
-            st.session_state.motor_speed = float(target_speed)
-            st.session_state.remediation_active = True
-            st.session_state.remediation_log.append({
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'fault': state,
-                'action': f'Speed reduced to {target_speed}%',
-                'health': live_health,
-                'rul': rul_val,
-                'temp': temp,
-                'current': i
-            })
-            # Send to n8n remediation webhook
-            try:
-                requests.post(
-                    "https://chaudhary0022.app.n8n.cloud/webhook/motormind-remediation",
-                    json={
-                        "action": "reduce_speed",
-                        "target_speed": target_speed,
-                        "fault": state,
-                        "health": live_health,
-                        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    },
-                    timeout=3
-                )
-            except Exception:
-                pass
-        elif state.lower() in ['normal', 'low']:
-            st.session_state.motor_speed = 100.0
-            st.session_state.remediation_active = False
+        # ═══════════════════════════════════════════
+        #  AUTO-REMEDIATION SMART TRIGGER
+        # ═══════════════════════════════════════════
+        # Determine target speed and actions
+        if state.lower() == 'high':
+            target_speed   = 0
+            motor_status   = 'EMERGENCY STOP'
+            rem_actions    = []
+            sensor_impacts = {}
+            if temp > 80:
+                rem_actions.append('Cooling fan activated — Temperature critical')
+                sensor_impacts['temperature'] = str(temp) + 'C — Emergency cooling ON'
+            if vib > 15:
+                rem_actions.append('Bearing inspection required — Vibration extreme')
+                sensor_impacts['vibration'] = str(vib) + 'mm/s — Motor stopped'
+            if i > 8:
+                rem_actions.append('Circuit breaker engaged — Current overload')
+                sensor_impacts['current'] = str(i) + 'A — Power restricted'
+            if v > 280:
+                rem_actions.append('Voltage regulator triggered — Overvoltage')
+                sensor_impacts['voltage'] = str(v) + 'V — Regulator active'
+            rem_actions.append('Motor completely stopped — Do not restart until inspected')
+        elif state.lower() == 'moderate':
+            target_speed   = 60
+            motor_status   = 'WARNING REDUCED'
+            rem_actions    = []
+            sensor_impacts = {}
+            if temp > 60:
+                rem_actions.append('Fan speed increased — Temperature elevated')
+                sensor_impacts['temperature'] = str(temp) + 'C — Cooling boosted'
+            if vib > 8:
+                rem_actions.append('Torque limited — Vibration high')
+                sensor_impacts['vibration'] = str(vib) + 'mm/s — Torque at 70%'
+            if i > 6:
+                rem_actions.append('Load reduced — Current elevated')
+                sensor_impacts['current'] = str(i) + 'A — Load at 60%'
+            rem_actions.append('Speed reduced to 60% — Schedule maintenance within 48h')
+        else:
+            target_speed   = 100
+            motor_status   = 'NORMAL OPERATION'
+            rem_actions    = ['All parameters normal — Motor running at full capacity']
+            sensor_impacts = {}
+
+        # Update session state
+        st.session_state.motor_speed        = float(target_speed)
+        st.session_state.remediation_active = target_speed < 100
+        st.session_state.remediation_log.append({
+            'Timestamp'   : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'Fault'       : state,
+            'Motor Status': motor_status,
+            'Speed %'     : target_speed,
+            'Actions'     : ' | '.join(rem_actions),
+            'Health'      : live_health,
+            'RUL (h)'     : rul_val,
+            'Temp'        : temp,
+            'Current'     : i,
+            'Voltage'     : v,
+            'Vibration'   : vib,
+        })
+
+        # Send to n8n remediation webhook
+        try:
+            cmd = 'EMERGENCY_STOP' if target_speed == 0 else 'SPEED_REDUCTION' if target_speed < 100 else 'NORMAL'
+            sev = 'CRITICAL'       if target_speed == 0 else 'WARNING'          if target_speed < 100 else 'NORMAL'
+            requests.post(
+                'https://chaudhary0022.app.n8n.cloud/webhook/motormind-remediation',
+                json={
+                    'command'          : cmd,
+                    'target_speed_percent': target_speed,
+                    'motor_status'     : motor_status,
+                    'fault'            : state,
+                    'severity'         : sev,
+                    'health_score'     : live_health,
+                    'rul_hours'        : rul_val,
+                    'sensor_impacts'   : sensor_impacts,
+                    'actions_taken'    : rem_actions,
+                    'timestamp'        : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                },
+                timeout=3
+            )
+        except Exception:
+            pass
+
+        # Show remediation result box
+        st.markdown('<div class="section-title">Auto-Remediation Response</div>', unsafe_allow_html=True)
+        if target_speed == 0:
+            rem_css   = 's-critical'
+            rem_title = 'MOTOR COMPLETELY STOPPED'
+        elif target_speed < 100:
+            rem_css   = 's-warning'
+            rem_title = 'SPEED REDUCED TO ' + str(target_speed) + '%'
+        else:
+            rem_css   = 's-good'
+            rem_title = 'NORMAL OPERATION — 100%'
+
+        actions_html = '<br>'.join(['• ' + a for a in rem_actions])
+        st.markdown(
+            '<div class="status-box ' + rem_css + '" style="margin-top:0.5rem;">'
+            '<div class="status-title">' + rem_title + '</div>'
+            '<div style="font-family:JetBrains Mono,monospace;font-size:0.7rem;'
+            'letter-spacing:2px;margin:6px 0;opacity:0.6;">' + motor_status + '</div>'
+            '<div class="status-msg">' + actions_html + '</div>'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
 # ══════════════════════════════════════════════════════════════
 #  TAB 4 — MAINTENANCE LOG
