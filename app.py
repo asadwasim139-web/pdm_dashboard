@@ -376,6 +376,37 @@ html, body, [class*="css"] {
     text-transform: uppercase;
     margin-bottom: 3px;
 }
+.speed-gauge-wrap {
+    background: #0d0d14;
+    border: 1px solid rgba(99,102,241,0.2);
+    border-radius: 14px;
+    padding: 1.5rem;
+    text-align: center;
+}
+.speed-value {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 4rem;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+}
+.speed-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: #4b5563;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
+.remediation-card {
+    background: rgba(16,185,129,0.06);
+    border: 1px solid rgba(16,185,129,0.25);
+    border-radius: 12px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 8px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.85rem;
+    color: #6ee7b7;
+}
 .n8n-badge {
     display: inline-flex;
     align-items: center;
@@ -460,6 +491,12 @@ def send_alert_to_n8n(state, prob, live_health, rul_val, v, i, temp, vib):
 # ══════════════════════════════════════════════════════════════
 if 'maint_log' not in st.session_state:
     st.session_state.maint_log = []
+if 'motor_speed' not in st.session_state:
+    st.session_state.motor_speed = 100.0
+if 'remediation_log' not in st.session_state:
+    st.session_state.remediation_log = []
+if 'remediation_active' not in st.session_state:
+    st.session_state.remediation_active = False
 
 # ══════════════════════════════════════════════════════════════
 #  HEADER
@@ -509,7 +546,8 @@ with st.sidebar:
     ◆ PDF Report Export<br>
     ◆ Multi-Class Confidence<br>
     ◆ 3D Feature Space Viewer<br>
-    ◆ n8n Alert Automation
+    ◆ n8n Alert Automation<br>
+    ◆ Auto-Remediation System
     </div>""", unsafe_allow_html=True)
 
     st.markdown("""<div style='height:1px;background:rgba(99,102,241,0.15);margin:1rem 0;'></div>""",
@@ -646,12 +684,13 @@ st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════
 #  TABS
 # ══════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "  📡  Sensor Analytics  ",
     "  🤖  Model Diagnostics  ",
     "  ⚡  Live Prediction  ",
     "  📋  Maintenance Log  ",
     "  📈  Forecast & Trends  ",
+    "  🔧  Auto-Remediation  ",
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -1072,6 +1111,39 @@ with tab3:
         })
         st.success("✅ Result saved to Maintenance Log.")
 
+        # AUTO-REMEDIATION TRIGGER
+        if state.lower() in ['high', 'moderate']:
+            target_speed = 30 if state.lower() == 'high' else 60
+            st.session_state.motor_speed = float(target_speed)
+            st.session_state.remediation_active = True
+            st.session_state.remediation_log.append({
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'fault': state,
+                'action': f'Speed reduced to {target_speed}%',
+                'health': live_health,
+                'rul': rul_val,
+                'temp': temp,
+                'current': i
+            })
+            # Send to n8n remediation webhook
+            try:
+                requests.post(
+                    "https://chaudhary0022.app.n8n.cloud/webhook/motormind-remediation",
+                    json={
+                        "action": "reduce_speed",
+                        "target_speed": target_speed,
+                        "fault": state,
+                        "health": live_health,
+                        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    },
+                    timeout=3
+                )
+            except Exception:
+                pass
+        elif state.lower() in ['normal', 'low']:
+            st.session_state.motor_speed = 100.0
+            st.session_state.remediation_active = False
+
 # ══════════════════════════════════════════════════════════════
 #  TAB 4 — MAINTENANCE LOG
 # ══════════════════════════════════════════════════════════════
@@ -1231,6 +1303,325 @@ with tab5:
     stats = df[['Voltage','Current','Temperature','Vibration']].describe().round(3)
     st.dataframe(stats.style.format(precision=3), use_container_width=True)
 
+
+
+# ══════════════════════════════════════════════════════════════
+#  TAB 6 — AUTO-REMEDIATION MONITOR
+# ══════════════════════════════════════════════════════════════
+with tab6:
+    st.markdown('<div class="section-title">Auto-Remediation Control System</div>', unsafe_allow_html=True)
+
+    # Current motor speed + status
+    current_speed = st.session_state.motor_speed
+    rem_active    = st.session_state.remediation_active
+    speed_color   = '#ef4444' if current_speed <= 30 else '#f59e0b' if current_speed <= 60 else '#10b981'
+    status_text   = 'EMERGENCY REDUCED' if current_speed <= 30 else 'WARNING REDUCED' if current_speed <= 60 else 'NORMAL OPERATION'
+    status_css    = 's-critical' if current_speed <= 30 else 's-warning' if current_speed <= 60 else 's-good'
+
+    # Top status banner
+    st.markdown(f"""
+    <div class="status-box {status_css}" style="margin-bottom:1rem;">
+        <div class="status-title">MOTOR STATUS — {status_text}</div>
+        <div class="status-msg">
+            Auto-Remediation {"ACTIVE — System protecting motor from damage" if rem_active else "STANDBY — Motor running normally"}
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    # Main gauges row
+    g1, g2, g3 = st.columns(3)
+
+    with g1:
+        fig_speed = go.Figure(go.Indicator(
+            mode="gauge+number+delta",
+            value=current_speed,
+            delta=dict(
+                reference=100,
+                valueformat='.0f',
+                font=dict(size=14, family='Space Grotesk')
+            ),
+            number=dict(
+                suffix="%",
+                font=dict(family='Space Grotesk', color=speed_color, size=48)
+            ),
+            title=dict(
+                text="MOTOR SPEED",
+                font=dict(family='JetBrains Mono', color='#4b5563', size=11)
+            ),
+            gauge=dict(
+                axis=dict(
+                    range=[0, 100],
+                    tickcolor='rgba(99,102,241,0.3)',
+                    tickfont=dict(color='#374151', size=9),
+                    tickvals=[0, 30, 60, 100]
+                ),
+                bar=dict(color=speed_color, thickness=0.28),
+                bgcolor='rgba(13,13,20,0.8)',
+                borderwidth=1,
+                bordercolor='rgba(99,102,241,0.15)',
+                steps=[
+                    dict(range=[0, 30],  color='rgba(239,68,68,0.08)'),
+                    dict(range=[30, 60], color='rgba(245,158,11,0.06)'),
+                    dict(range=[60, 100],color='rgba(16,185,129,0.06)'),
+                ],
+                threshold=dict(
+                    line=dict(color='rgba(239,68,68,0.6)', width=2),
+                    thickness=0.8,
+                    value=30
+                )
+            )
+        ))
+        fig_speed.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            height=280,
+            margin=dict(t=40, b=10, l=30, r=30)
+        )
+        st.plotly_chart(fig_speed, use_container_width=True)
+
+    with g2:
+        # Power consumption estimate
+        power_pct = current_speed * 0.85
+        fig_power = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=round(power_pct, 1),
+            number=dict(
+                suffix="%",
+                font=dict(family='Space Grotesk', color='#6366f1', size=36)
+            ),
+            title=dict(
+                text="POWER CONSUMPTION",
+                font=dict(family='JetBrains Mono', color='#4b5563', size=11)
+            ),
+            gauge=dict(
+                axis=dict(range=[0, 100], tickcolor='rgba(99,102,241,0.3)',
+                          tickfont=dict(color='#374151', size=9)),
+                bar=dict(color='#6366f1', thickness=0.25),
+                bgcolor='rgba(13,13,20,0.8)',
+                borderwidth=1,
+                bordercolor='rgba(99,102,241,0.12)',
+                steps=[
+                    dict(range=[0, 50],  color='rgba(16,185,129,0.04)'),
+                    dict(range=[50, 80], color='rgba(245,158,11,0.04)'),
+                    dict(range=[80, 100],color='rgba(239,68,68,0.04)'),
+                ]
+            )
+        ))
+        fig_power.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            height=280,
+            margin=dict(t=40, b=10, l=30, r=30)
+        )
+        st.plotly_chart(fig_power, use_container_width=True)
+
+    with g3:
+        # System safety score
+        safety = min(100, (100 - current_speed) * 1.2 + 20) if rem_active else 72.0
+        safety = round(min(safety, 100), 1)
+        safety_col = '#10b981' if safety >= 70 else '#f59e0b' if safety >= 40 else '#ef4444'
+        fig_safety = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=safety,
+            number=dict(
+                font=dict(family='Space Grotesk', color=safety_col, size=36)
+            ),
+            title=dict(
+                text="SYSTEM SAFETY SCORE",
+                font=dict(family='JetBrains Mono', color='#4b5563', size=11)
+            ),
+            gauge=dict(
+                axis=dict(range=[0, 100], tickcolor='rgba(99,102,241,0.3)',
+                          tickfont=dict(color='#374151', size=9)),
+                bar=dict(color=safety_col, thickness=0.25),
+                bgcolor='rgba(13,13,20,0.8)',
+                borderwidth=1,
+                bordercolor='rgba(99,102,241,0.12)',
+                steps=[
+                    dict(range=[0, 40],  color='rgba(239,68,68,0.06)'),
+                    dict(range=[40, 70], color='rgba(245,158,11,0.06)'),
+                    dict(range=[70, 100],color='rgba(16,185,129,0.06)'),
+                ]
+            )
+        ))
+        fig_safety.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            height=280,
+            margin=dict(t=40, b=10, l=30, r=30)
+        )
+        st.plotly_chart(fig_safety, use_container_width=True)
+
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    # Manual controls
+    st.markdown('<div class="section-title">Manual Override Controls</div>', unsafe_allow_html=True)
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    with mc1:
+        if st.button("FULL SPEED (100%)", use_container_width=True, key="speed_100"):
+            st.session_state.motor_speed = 100.0
+            st.session_state.remediation_active = False
+            st.session_state.remediation_log.append({
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'fault': 'Manual Override',
+                'action': 'Speed restored to 100%',
+                'health': '—', 'rul': '—', 'temp': '—', 'current': '—'
+            })
+            st.rerun()
+    with mc2:
+        if st.button("REDUCE TO 60%", use_container_width=True, key="speed_60"):
+            st.session_state.motor_speed = 60.0
+            st.session_state.remediation_active = True
+            st.session_state.remediation_log.append({
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'fault': 'Manual Override',
+                'action': 'Speed reduced to 60%',
+                'health': '—', 'rul': '—', 'temp': '—', 'current': '—'
+            })
+            st.rerun()
+    with mc3:
+        if st.button("REDUCE TO 30%", use_container_width=True, key="speed_30"):
+            st.session_state.motor_speed = 30.0
+            st.session_state.remediation_active = True
+            st.session_state.remediation_log.append({
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'fault': 'Manual Override',
+                'action': 'Emergency: Speed to 30%',
+                'health': '—', 'rul': '—', 'temp': '—', 'current': '—'
+            })
+            st.rerun()
+    with mc4:
+        if st.button("EMERGENCY STOP", use_container_width=True, key="speed_0"):
+            st.session_state.motor_speed = 0.0
+            st.session_state.remediation_active = True
+            st.session_state.remediation_log.append({
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'fault': 'EMERGENCY STOP',
+                'action': 'Motor completely stopped!',
+                'health': '—', 'rul': '—', 'temp': '—', 'current': '—'
+            })
+            st.rerun()
+
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    # What happened info box
+    if rem_active and st.session_state.remediation_log:
+        last = st.session_state.remediation_log[-1]
+        st.markdown(f"""
+        <div style='background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);
+        border-radius:12px;padding:1rem 1.2rem;margin-bottom:1rem;'>
+            <div style='font-family:JetBrains Mono,monospace;font-size:0.7rem;
+            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:0.5rem;'>
+            ⚙️ Last Auto-Remediation Event
+            </div>
+            <div style='font-family:Space Grotesk,sans-serif;font-size:0.88rem;color:#a5b4fc;'>
+            Time: {last["timestamp"]}<br>
+            Fault: {last["fault"]}<br>
+            Action: {last["action"]}<br>
+            Health Score: {last["health"]}
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+    # Remediation history log
+    st.markdown('<div class="section-title">Remediation Event History</div>', unsafe_allow_html=True)
+
+    if st.session_state.remediation_log:
+        rem_df = pd.DataFrame(st.session_state.remediation_log)
+        st.dataframe(rem_df.style.format(precision=2), use_container_width=True)
+
+        # Speed history chart
+        if len(st.session_state.remediation_log) > 1:
+            speed_history = []
+            for r in st.session_state.remediation_log:
+                spd = 100
+                if '30%' in r['action'] or 'Emergency' in r['action']:
+                    spd = 30
+                elif '60%' in r['action']:
+                    spd = 60
+                elif '100%' in r['action']:
+                    spd = 100
+                elif 'stopped' in r['action']:
+                    spd = 0
+                speed_history.append({'time': r['timestamp'], 'speed': spd, 'event': r['action']})
+
+            sh_df = pd.DataFrame(speed_history)
+            fig_hist = go.Figure()
+            fig_hist.add_trace(go.Scatter(
+                x=sh_df['time'], y=sh_df['speed'],
+                mode='lines+markers',
+                line=dict(color='#6366f1', width=2),
+                marker=dict(size=10, color=[
+                    '#ef4444' if s <= 30 else '#f59e0b' if s <= 60 else '#10b981'
+                    for s in sh_df['speed']
+                ], line=dict(color='#ffffff', width=1)),
+                fill='tozeroy',
+                fillcolor='rgba(99,102,241,0.07)',
+                text=sh_df['event'],
+                hovertemplate='<b>%{text}</b><br>Speed: %{y}%<br>Time: %{x}<extra></extra>'
+            ))
+            fig_hist.add_hline(y=30, line=dict(color='rgba(239,68,68,0.4)', dash='dot', width=1))
+            fig_hist.add_hline(y=60, line=dict(color='rgba(245,158,11,0.4)', dash='dot', width=1))
+            fig_hist.update_layout(
+                **PL, height=280,
+                title='Motor Speed History',
+                xaxis=make_axis(title='Time'),
+                yaxis=make_axis(range=[-5, 110], title='Speed (%)')
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+        # Clear button
+        if st.button("CLEAR REMEDIATION LOG", use_container_width=True, key="clear_rem"):
+            st.session_state.remediation_log = []
+            st.session_state.motor_speed = 100.0
+            st.session_state.remediation_active = False
+            st.rerun()
+    else:
+        st.markdown("""
+        <div style='text-align:center;padding:3rem;background:#0d0d14;
+        border:1px solid rgba(99,102,241,0.15);border-radius:12px;
+        font-family:JetBrains Mono,monospace;font-size:0.75rem;
+        color:#374151;letter-spacing:2px;text-transform:uppercase;'>
+        No remediation events yet — Run a fault analysis in Live Prediction tab
+        </div>""", unsafe_allow_html=True)
+
+    # How it works explanation
+    st.markdown('<div class="section-title">How Auto-Remediation Works</div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px;'>
+        <div style='background:#0d0d14;border:1px solid rgba(99,102,241,0.15);
+        border-radius:12px;padding:1rem;text-align:center;'>
+            <div style='font-size:1.5rem;margin-bottom:8px;'>🔍</div>
+            <div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
+            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;'>
+            Step 1</div>
+            <div style='font-family:Space Grotesk,sans-serif;font-size:0.8rem;color:#8b8fa8;'>
+            AI detects fault from sensor data</div>
+        </div>
+        <div style='background:#0d0d14;border:1px solid rgba(99,102,241,0.15);
+        border-radius:12px;padding:1rem;text-align:center;'>
+            <div style='font-size:1.5rem;margin-bottom:8px;'>⚡</div>
+            <div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
+            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;'>
+            Step 2</div>
+            <div style='font-family:Space Grotesk,sans-serif;font-size:0.8rem;color:#8b8fa8;'>
+            n8n workflow triggers automatically</div>
+        </div>
+        <div style='background:#0d0d14;border:1px solid rgba(99,102,241,0.15);
+        border-radius:12px;padding:1rem;text-align:center;'>
+            <div style='font-size:1.5rem;margin-bottom:8px;'>📧</div>
+            <div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
+            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;'>
+            Step 3</div>
+            <div style='font-family:Space Grotesk,sans-serif;font-size:0.8rem;color:#8b8fa8;'>
+            Email + WhatsApp alert sent to team</div>
+        </div>
+        <div style='background:#0d0d14;border:1px solid rgba(99,102,241,0.15);
+        border-radius:12px;padding:1rem;text-align:center;'>
+            <div style='font-size:1.5rem;margin-bottom:8px;'>🔧</div>
+            <div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
+            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;'>
+            Step 4</div>
+            <div style='font-family:Space Grotesk,sans-serif;font-size:0.8rem;color:#8b8fa8;'>
+            Motor speed auto-reduced to safe level</div>
+        </div>
+    </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
 #  FOOTER
