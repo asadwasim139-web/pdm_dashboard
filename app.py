@@ -1,1856 +1,423 @@
-import streamlit as st
-import pandas as pd
+# ════════════════════════════════════════════════════════════════════
+#  MOTORMIND AI — Complete ML Training Pipeline
+#  Team: PREDICT X
+#  Project: AI-Powered Predictive Maintenance for DC Motors
+#  Hardware: Arduino + Voltage/Current/Vibration Sensors
+# ════════════════════════════════════════════════════════════════════
+#
+#  HOW TO RUN ON GOOGLE COLAB:
+#    1. Open https://colab.research.google.com
+#    2. File -> New notebook
+#    3. Upload `final_features_vib_included.csv` to Files (left sidebar)
+#    4. Copy this ENTIRE script into a single cell
+#    5. Runtime -> Run all
+#    6. Wait ~2 minutes -- all models will be saved as .pkl files
+#    7. Download .pkl files for your Streamlit dashboard
+# ════════════════════════════════════════════════════════════════════
+
+# ─── STEP 1: Install dependencies ────────────────────────────────────
+import subprocess, sys
+def pip_install(pkg):
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', pkg])
+
+for pkg in ['xgboost', 'shap', 'joblib']:
+    try:
+        __import__(pkg)
+    except ImportError:
+        pip_install(pkg)
+
+# ─── STEP 2: Imports ─────────────────────────────────────────────────
 import numpy as np
-import warnings
-import io
-import base64
-import requests
-from datetime import datetime, timedelta
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings, joblib, json
+from datetime import datetime
 
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingRegressor
-from sklearn.metrics import confusion_matrix, classification_report
-from sklearn.preprocessing import LabelEncoder
-from sklearn.linear_model import LinearRegression
-
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
+from sklearn.model_selection import (train_test_split, cross_val_score,
+                                     StratifiedKFold, GridSearchCV)
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
+                              GradientBoostingRegressor, IsolationForest)
+from sklearn.svm import SVC
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
+                             f1_score, precision_score, recall_score,
+                             mean_absolute_error, mean_squared_error, r2_score)
+from sklearn.decomposition import PCA
+import xgboost as xgb
 
 warnings.filterwarnings('ignore')
+np.random.seed(42)
 
-st.set_page_config(
-    page_title="MotorMind AI",
-    layout="wide",
-    page_icon="🔧",
-    initial_sidebar_state="expanded"
-)
+# Plot styling
+sns.set_style('whitegrid')
+plt.rcParams['figure.figsize'] = (10, 6)
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;700&display=swap');
+print('=' * 70)
+print('  MOTORMIND AI — TRAINING PIPELINE')
+print('  Team PREDICT X — Electrical Engineering Department')
+print('=' * 70)
 
-html, body, [class*="css"] {
-    font-family: 'Space Grotesk', sans-serif !important;
+# ─── STEP 3: Load dataset ────────────────────────────────────────────
+DATA_PATH = 'final_features_vib_included.csv'   # adjust if needed
+df = pd.read_csv(DATA_PATH)
+
+print(f'\nDataset shape:    {df.shape}')
+print(f'Total samples:    {len(df)}')
+print(f'Total features:   {len(df.columns) - 1}')
+print(f'Missing values:   {df.isnull().sum().sum()}')
+print(f'\nClass distribution:')
+print(df['condition'].value_counts())
+
+# ─── STEP 4: EDA — Class distribution & correlation ──────────────────
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+class_counts = df['condition'].value_counts()
+colors = ['#10b981', '#6366f1', '#f59e0b', '#ef4444']
+
+axes[0].bar(range(len(class_counts)), class_counts.values, color=colors)
+axes[0].set_xticks(range(len(class_counts)))
+axes[0].set_xticklabels(class_counts.index, rotation=20, ha='right')
+axes[0].set_title('Class Distribution', fontweight='bold')
+axes[0].set_ylabel('Sample Count')
+
+axes[1].pie(class_counts.values, labels=class_counts.index, colors=colors,
+            autopct='%1.1f%%', startangle=90)
+axes[1].set_title('Class Balance', fontweight='bold')
+plt.tight_layout()
+plt.savefig('class_distribution.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# Correlation matrix
+feature_cols_all = [c for c in df.columns if c != 'condition']
+fig, ax = plt.subplots(figsize=(16, 12))
+sns.heatmap(df[feature_cols_all].corr(), annot=True, fmt='.2f',
+            cmap='RdYlGn', center=0, ax=ax, annot_kws={'size': 7})
+ax.set_title('Feature Correlation Matrix', fontweight='bold')
+plt.tight_layout()
+plt.savefig('correlation_matrix.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# ─── STEP 5: Preprocessing ───────────────────────────────────────────
+le = LabelEncoder()
+df['condition_encoded'] = le.fit_transform(df['condition'])
+class_names = le.classes_
+
+print('\nClass encoding:')
+for i, c in enumerate(class_names):
+    print(f'  {i} -> {c}')
+
+FEATURE_COLS = [c for c in df.columns if c not in
+                ['condition', 'condition_encoded']]
+X = df[FEATURE_COLS].values
+y = df['condition_encoded'].values
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.20, random_state=42, stratify=y)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled  = scaler.transform(X_test)
+
+print(f'\nTrain: {X_train.shape[0]} | Test: {X_test.shape[0]}')
+
+# ─── STEP 6: Train & compare 4 classifiers ───────────────────────────
+print('\n' + '=' * 70)
+print('TRAINING 4 CLASSIFIERS')
+print('=' * 70)
+
+models = {
+    'Random Forest':     RandomForestClassifier(n_estimators=200, max_depth=20,
+                                                random_state=42, n_jobs=-1),
+    'Gradient Boosting': GradientBoostingClassifier(n_estimators=200, max_depth=5,
+                                                    random_state=42),
+    'XGBoost':           xgb.XGBClassifier(n_estimators=200, max_depth=6,
+                                           learning_rate=0.1, random_state=42,
+                                           eval_metric='mlogloss',
+                                           use_label_encoder=False),
+    'SVM (RBF)':         SVC(kernel='rbf', C=10, gamma='scale',
+                             probability=True, random_state=42),
 }
 
-.stApp {
-    background: #0a0a0f;
-    background-image:
-        radial-gradient(circle at 15% 85%, rgba(99,102,241,0.08) 0%, transparent 50%),
-        radial-gradient(circle at 85% 15%, rgba(16,185,129,0.06) 0%, transparent 50%);
+results = {}
+for name, model in models.items():
+    print(f'\nTraining: {name}')
+    Xtr = X_train_scaled if 'SVM' in name else X_train
+    Xte = X_test_scaled  if 'SVM' in name else X_test
+
+    model.fit(Xtr, y_train)
+    y_pred = model.predict(Xte)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv_scores = cross_val_score(model, Xtr, y_train, cv=cv,
+                                 scoring='accuracy', n_jobs=-1)
+
+    results[name] = {
+        'model':     model,
+        'accuracy':  accuracy_score(y_test, y_pred),
+        'precision': precision_score(y_test, y_pred, average='weighted'),
+        'recall':    recall_score(y_test, y_pred, average='weighted'),
+        'f1':        f1_score(y_test, y_pred, average='weighted'),
+        'cv_mean':   cv_scores.mean(),
+        'cv_std':    cv_scores.std(),
+        'y_pred':    y_pred,
+    }
+    print(f'  Test Accuracy: {results[name]["accuracy"]:.4f} | '
+          f'F1: {results[name]["f1"]:.4f} | '
+          f'CV: {cv_scores.mean():.4f} +/- {cv_scores.std():.4f}')
+
+# Summary
+summary_df = pd.DataFrame({
+    'Model':     list(results.keys()),
+    'Accuracy':  [r['accuracy']  for r in results.values()],
+    'Precision': [r['precision'] for r in results.values()],
+    'Recall':    [r['recall']    for r in results.values()],
+    'F1-Score':  [r['f1']        for r in results.values()],
+    'CV Mean':   [r['cv_mean']   for r in results.values()],
+}).round(4).sort_values('F1-Score', ascending=False).reset_index(drop=True)
+
+print('\n' + '=' * 70)
+print('MODEL COMPARISON SUMMARY')
+print('=' * 70)
+print(summary_df.to_string(index=False))
+
+BEST_MODEL_NAME = summary_df.iloc[0]['Model']
+best_model = results[BEST_MODEL_NAME]['model']
+print(f'\nBEST MODEL: {BEST_MODEL_NAME}')
+
+# Comparison plot
+fig, ax = plt.subplots(figsize=(12, 6))
+x = np.arange(len(summary_df))
+w = 0.2
+ax.bar(x - 1.5*w, summary_df['Accuracy'],  w, label='Accuracy',  color='#10b981')
+ax.bar(x - 0.5*w, summary_df['Precision'], w, label='Precision', color='#6366f1')
+ax.bar(x + 0.5*w, summary_df['Recall'],    w, label='Recall',    color='#f59e0b')
+ax.bar(x + 1.5*w, summary_df['F1-Score'],  w, label='F1-Score',  color='#ef4444')
+ax.set_xticks(x); ax.set_xticklabels(summary_df['Model'])
+ax.set_title('Model Performance Comparison', fontweight='bold')
+ax.set_ylim([0.85, 1.01]); ax.legend()
+plt.tight_layout()
+plt.savefig('model_comparison.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# ─── STEP 7: Confusion matrix & feature importance ───────────────────
+y_pred_best = results[BEST_MODEL_NAME]['y_pred']
+cm = confusion_matrix(y_test, y_pred_best)
+
+fig, ax = plt.subplots(figsize=(9, 7))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=class_names, yticklabels=class_names, ax=ax)
+ax.set_title(f'Confusion Matrix — {BEST_MODEL_NAME}', fontweight='bold')
+ax.set_ylabel('Actual'); ax.set_xlabel('Predicted')
+plt.xticks(rotation=20, ha='right'); plt.yticks(rotation=0)
+plt.tight_layout()
+plt.savefig('confusion_matrix.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print(f'\nClassification Report — {BEST_MODEL_NAME}')
+print('=' * 70)
+print(classification_report(y_test, y_pred_best,
+                             target_names=class_names, digits=4))
+
+if hasattr(best_model, 'feature_importances_'):
+    fi = pd.DataFrame({'feature': FEATURE_COLS,
+                       'importance': best_model.feature_importances_}
+                      ).sort_values('importance', ascending=True)
+    fig, ax = plt.subplots(figsize=(11, 9))
+    ax.barh(fi['feature'], fi['importance'],
+            color=plt.cm.viridis(np.linspace(0.3, 0.9, len(fi))))
+    ax.set_xlabel('Feature Importance')
+    ax.set_title(f'Feature Importance — {BEST_MODEL_NAME}', fontweight='bold')
+    plt.tight_layout()
+    plt.savefig('feature_importance.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print('\nTop 10 features:')
+    print(fi.tail(10)[::-1].to_string(index=False))
+
+# ─── STEP 8: Hyperparameter tuning ───────────────────────────────────
+print('\n' + '=' * 70)
+print(f'HYPERPARAMETER TUNING — {BEST_MODEL_NAME}')
+print('=' * 70)
+
+if BEST_MODEL_NAME == 'Random Forest':
+    param_grid = {'n_estimators': [200, 300], 'max_depth': [15, 20, None]}
+    base = RandomForestClassifier(random_state=42, n_jobs=-1)
+    Xtr_g = X_train
+elif BEST_MODEL_NAME == 'XGBoost':
+    param_grid = {'n_estimators': [200, 300], 'max_depth': [5, 7],
+                  'learning_rate': [0.05, 0.1]}
+    base = xgb.XGBClassifier(random_state=42, eval_metric='mlogloss',
+                             use_label_encoder=False)
+    Xtr_g = X_train
+elif BEST_MODEL_NAME == 'Gradient Boosting':
+    param_grid = {'n_estimators': [200, 300], 'max_depth': [3, 5, 7],
+                  'learning_rate': [0.05, 0.1]}
+    base = GradientBoostingClassifier(random_state=42)
+    Xtr_g = X_train
+else:
+    param_grid = {'C': [1, 10, 50], 'gamma': ['scale', 'auto']}
+    base = SVC(kernel='rbf', probability=True, random_state=42)
+    Xtr_g = X_train_scaled
+
+grid = GridSearchCV(base, param_grid, cv=5, scoring='f1_weighted',
+                    n_jobs=-1, verbose=1)
+grid.fit(Xtr_g, y_train)
+print(f'\nBest params: {grid.best_params_}')
+print(f'Best CV F1:  {grid.best_score_:.4f}')
+
+best_model = grid.best_estimator_
+Xte = X_test_scaled if 'SVM' in BEST_MODEL_NAME else X_test
+y_pred_tuned = best_model.predict(Xte)
+final_acc = accuracy_score(y_test, y_pred_tuned)
+final_f1  = f1_score(y_test, y_pred_tuned, average='weighted')
+print(f'Tuned accuracy: {final_acc:.4f} | F1: {final_f1:.4f}')
+
+# ─── STEP 9: Health Score Engine ─────────────────────────────────────
+def compute_health_score(row):
+    """Health Score (0-100): higher = healthier motor."""
+    v_norm   = np.clip((12.0 - row['V_mean']) / 2.0, 0, 1)
+    i_norm   = np.clip(row['I_mean'] / 0.5, 0, 1)
+    vib_norm = np.clip(row['VIB_rms'] / 5.0, 0, 1)
+    fft_norm = np.clip(row['VIB_fft_peak'] / 50.0, 0, 1)
+    stress = 0.20*v_norm + 0.25*i_norm + 0.30*vib_norm + 0.25*fft_norm
+    return round((1 - stress) * 100, 2)
+
+df['health_score'] = df.apply(compute_health_score, axis=1)
+print('\nAverage Health Score per condition:')
+print(df.groupby('condition')['health_score'].agg(['mean','min','max']).round(2))
+
+# ─── STEP 10: RUL Regressor ──────────────────────────────────────────
+print('\n' + '=' * 70)
+print('TRAINING RUL REGRESSOR')
+print('=' * 70)
+
+RUL_BASE_HOURS = {
+    'no load':                   500,
+    'normal load(controlled)':   300,
+    'normal load(Uncontrolled)': 150,
+    'high load(controlled)':     50,
+}
+df['rul_target'] = df['condition'].map(RUL_BASE_HOURS) + np.random.normal(0, 15, len(df))
+df['rul_target'] = df['rul_target'].clip(lower=0)
+
+X_rul = df[FEATURE_COLS].values
+y_rul = df['rul_target'].values
+
+X_rul_train, X_rul_test, y_rul_train, y_rul_test = train_test_split(
+    X_rul, y_rul, test_size=0.2, random_state=42)
+
+rul_model = GradientBoostingRegressor(n_estimators=200, max_depth=5,
+                                       learning_rate=0.1, random_state=42)
+rul_model.fit(X_rul_train, y_rul_train)
+y_rul_pred = rul_model.predict(X_rul_test)
+
+mae  = mean_absolute_error(y_rul_test, y_rul_pred)
+rmse = np.sqrt(mean_squared_error(y_rul_test, y_rul_pred))
+r2   = r2_score(y_rul_test, y_rul_pred)
+
+print(f'  MAE:  {mae:.2f} hours')
+print(f'  RMSE: {rmse:.2f} hours')
+print(f'  R^2:  {r2:.4f}')
+
+# ─── STEP 11: Anomaly Detection (Isolation Forest) ───────────────────
+print('\n' + '=' * 70)
+print('TRAINING ANOMALY DETECTOR (Isolation Forest)')
+print('=' * 70)
+
+normal_data = df[df['condition'] == 'no load'][FEATURE_COLS].values
+iso_forest = IsolationForest(contamination=0.05, random_state=42, n_jobs=-1)
+iso_forest.fit(normal_data)
+
+df['is_anomaly'] = (iso_forest.predict(df[FEATURE_COLS].values) == -1).astype(int)
+print('\nAnomalies per condition:')
+print(df.groupby('condition')['is_anomaly'].agg(['sum','mean']).round(3))
+
+# ─── STEP 12: Save all models ────────────────────────────────────────
+print('\n' + '=' * 70)
+print('SAVING MODELS')
+print('=' * 70)
+
+joblib.dump(best_model,  'motormind_classifier.pkl')
+joblib.dump(rul_model,   'motormind_rul_model.pkl')
+joblib.dump(iso_forest,  'motormind_anomaly_model.pkl')
+joblib.dump(scaler,      'motormind_scaler.pkl')
+joblib.dump(le,          'motormind_label_encoder.pkl')
+
+metadata = {
+    'team':            'PREDICT X',
+    'project':         'MotorMind AI',
+    'created':         datetime.now().isoformat(),
+    'best_model_name': BEST_MODEL_NAME,
+    'test_accuracy':   float(final_acc),
+    'test_f1':         float(final_f1),
+    'rul_mae_hours':   float(mae),
+    'rul_r2':          float(r2),
+    'feature_columns': FEATURE_COLS,
+    'classes':         list(class_names),
+    'rul_baseline_map': RUL_BASE_HOURS,
 }
 
-[data-testid="stSidebar"] {
-    background: #0d0d14 !important;
-    border-right: 1px solid rgba(99,102,241,0.2) !important;
-}
-[data-testid="stSidebar"] * {
-    color: #8b8fa8 !important;
-}
-[data-testid="stSidebar"] .stMarkdown p {
-    font-family: 'Space Grotesk', sans-serif !important;
-}
-
-.main-header {
-    background: linear-gradient(135deg, #0d0d14 0%, #111128 100%);
-    border: 1px solid rgba(99,102,241,0.25);
-    border-radius: 16px;
-    padding: 2rem 2.5rem;
-    margin-bottom: 1.5rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    position: relative;
-    overflow: hidden;
-}
-.main-header::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: linear-gradient(90deg, transparent, #6366f1, #10b981, transparent);
-}
-.brand-name {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 2rem;
-    font-weight: 700;
-    color: #ffffff;
-    letter-spacing: -0.5px;
-    margin: 0;
-}
-.brand-name span { color: #6366f1; }
-.brand-sub {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.72rem;
-    color: #4b5563;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-    margin-top: 4px;
-}
-.team-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: rgba(99,102,241,0.12);
-    border: 1px solid rgba(99,102,241,0.35);
-    border-radius: 20px;
-    padding: 5px 14px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.68rem;
-    color: #a5b4fc;
-    letter-spacing: 2px;
-    margin-top: 8px;
-}
-.live-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(16,185,129,0.12);
-    border: 1px solid rgba(16,185,129,0.3);
-    border-radius: 20px;
-    padding: 6px 14px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.7rem;
-    color: #10b981;
-    letter-spacing: 2px;
-}
-.live-dot {
-    width: 6px; height: 6px;
-    background: #10b981;
-    border-radius: 50%;
-    animation: pulse-dot 1.5s infinite;
-    display: inline-block;
-}
-@keyframes pulse-dot {
-    0%,100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(1.3); }
-}
-
-.kpi-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 1rem; }
-.kpi-card {
-    background: #0d0d14;
-    border: 1px solid rgba(99,102,241,0.15);
-    border-radius: 12px;
-    padding: 1.1rem 1rem;
-    position: relative;
-    overflow: hidden;
-    transition: border-color 0.2s;
-}
-.kpi-card:hover { border-color: rgba(99,102,241,0.4); }
-.kpi-card::after {
-    content: '';
-    position: absolute;
-    bottom: 0; left: 0; right: 0;
-    height: 2px;
-    background: var(--accent);
-    opacity: 0.7;
-}
-.kpi-icon { font-size: 1.2rem; margin-bottom: 6px; }
-.kpi-val {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 1.6rem;
-    font-weight: 700;
-    color: #f1f5f9;
-    line-height: 1;
-    margin-bottom: 4px;
-}
-.kpi-lbl {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.65rem;
-    color: #4b5563;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-}
-
-.section-title {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.72rem;
-    color: #6366f1;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-    padding: 0.6rem 0 0.6rem 1rem;
-    border-left: 2px solid #6366f1;
-    margin: 1.2rem 0 0.8rem;
-}
-
-.divider {
-    height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(99,102,241,0.3), rgba(16,185,129,0.3), transparent);
-    margin: 1rem 0;
-}
-
-.status-box {
-    border-radius: 12px;
-    padding: 1.5rem;
-    text-align: center;
-    border: 1px solid;
-    position: relative;
-    overflow: hidden;
-}
-.status-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 1.3rem;
-    font-weight: 700;
-    margin-bottom: 6px;
-}
-.status-msg {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 0.9rem;
-    opacity: 0.8;
-    line-height: 1.5;
-}
-.s-critical { background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.4); color: #fca5a5; }
-.s-warning  { background: rgba(245,158,11,0.08); border-color: rgba(245,158,11,0.4); color: #fcd34d; }
-.s-good     { background: rgba(16,185,129,0.08); border-color: rgba(16,185,129,0.35); color: #6ee7b7; }
-
-.health-ring-wrap {
-    background: #0d0d14;
-    border: 1px solid rgba(99,102,241,0.15);
-    border-radius: 14px;
-    padding: 1.2rem;
-    text-align: center;
-}
-.rul-card {
-    background: linear-gradient(135deg, #0d0d14, #111128);
-    border: 1px solid rgba(99,102,241,0.25);
-    border-radius: 14px;
-    padding: 1.2rem 1.5rem;
-}
-.rul-number {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 2.8rem;
-    font-weight: 700;
-    color: #6366f1;
-    line-height: 1;
-}
-.rul-label {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.65rem;
-    color: #4b5563;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    margin-top: 4px;
-}
-
-.log-row {
-    background: #0d0d14;
-    border: 1px solid rgba(99,102,241,0.1);
-    border-radius: 8px;
-    padding: 0.7rem 1rem;
-    margin-bottom: 6px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 0.85rem;
-    color: #8b8fa8;
-}
-
-.stTabs [data-baseweb="tab-list"] {
-    background: #0d0d14 !important;
-    border-bottom: 1px solid rgba(99,102,241,0.15) !important;
-    gap: 0 !important;
-}
-.stTabs [data-baseweb="tab"] {
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.7rem !important;
-    letter-spacing: 2px !important;
-    color: #4b5563 !important;
-    padding: 14px 22px !important;
-    border-bottom: 2px solid transparent !important;
-    text-transform: uppercase !important;
-}
-.stTabs [aria-selected="true"] {
-    color: #6366f1 !important;
-    border-bottom: 2px solid #6366f1 !important;
-    background: rgba(99,102,241,0.06) !important;
-}
-
-.stButton > button {
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.8rem !important;
-    letter-spacing: 2px !important;
-    background: #6366f1 !important;
-    color: #ffffff !important;
-    border: none !important;
-    border-radius: 8px !important;
-    padding: 0.8rem 1.5rem !important;
-    font-weight: 600 !important;
-    transition: all 0.2s !important;
-    text-transform: uppercase !important;
-}
-.stButton > button:hover {
-    background: #4f46e5 !important;
-    transform: translateY(-1px) !important;
-    box-shadow: 0 4px 20px rgba(99,102,241,0.35) !important;
-}
-
-[data-testid="stSlider"] label {
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.7rem !important;
-    color: #6b7280 !important;
-    letter-spacing: 1.5px !important;
-}
-
-.stSelectbox label {
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.7rem !important;
-    color: #6b7280 !important;
-    letter-spacing: 1.5px !important;
-}
-
-.await-screen {
-    text-align: center;
-    padding: 6rem 2rem;
-    background: #0d0d14;
-    border: 1px solid rgba(99,102,241,0.15);
-    border-radius: 16px;
-    margin-top: 2rem;
-}
-.await-icon { font-size: 4rem; margin-bottom: 1.5rem; animation: spin 10s linear infinite; display: inline-block; }
-@keyframes spin { to { transform: rotate(360deg); } }
-
-.stTextInput > div > div > input {
-    font-family: 'Space Grotesk', sans-serif !important;
-    background: #0d0d14 !important;
-    border: 1px solid rgba(99,102,241,0.25) !important;
-    color: #f1f5f9 !important;
-    border-radius: 8px !important;
-}
-
-.footer-bar {
-    text-align: center;
-    padding: 1rem 0;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.62rem;
-    color: #1f2937;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-}
-
-.chat-container {
-    background: #0d0d14;
-    border: 1px solid rgba(99,102,241,0.2);
-    border-radius: 14px;
-    padding: 1.2rem;
-    max-height: 480px;
-    overflow-y: auto;
-    margin-bottom: 1rem;
-}
-.chat-msg-user {
-    background: rgba(99,102,241,0.12);
-    border: 1px solid rgba(99,102,241,0.25);
-    border-radius: 12px 12px 4px 12px;
-    padding: 0.8rem 1rem;
-    margin: 0.5rem 0 0.5rem 3rem;
-    font-family: Space Grotesk, sans-serif;
-    font-size: 0.88rem;
-    color: #a5b4fc;
-}
-.chat-msg-ai {
-    background: rgba(16,185,129,0.06);
-    border: 1px solid rgba(16,185,129,0.2);
-    border-radius: 12px 12px 12px 4px;
-    padding: 0.8rem 1rem;
-    margin: 0.5rem 3rem 0.5rem 0;
-    font-family: Space Grotesk, sans-serif;
-    font-size: 0.88rem;
-    color: #6ee7b7;
-    line-height: 1.6;
-}
-.chat-label-user {
-    font-family: JetBrains Mono, monospace;
-    font-size: 0.6rem;
-    color: #6366f1;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    margin-bottom: 3px;
-    text-align: right;
-}
-.chat-label-ai {
-    font-family: JetBrains Mono, monospace;
-    font-size: 0.6rem;
-    color: #10b981;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    margin-bottom: 3px;
-}
-.speed-gauge-wrap {
-    background: #0d0d14;
-    border: 1px solid rgba(99,102,241,0.2);
-    border-radius: 14px;
-    padding: 1.5rem;
-    text-align: center;
-}
-.speed-value {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 4rem;
-    font-weight: 700;
-    line-height: 1;
-    margin-bottom: 4px;
-}
-.speed-label {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.65rem;
-    color: #4b5563;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-}
-.remediation-card {
-    background: rgba(16,185,129,0.06);
-    border: 1px solid rgba(16,185,129,0.25);
-    border-radius: 12px;
-    padding: 1rem 1.2rem;
-    margin-bottom: 8px;
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 0.85rem;
-    color: #6ee7b7;
-}
-.n8n-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(255,100,0,0.12);
-    border: 1px solid rgba(255,100,0,0.3);
-    border-radius: 20px;
-    padding: 6px 14px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.7rem;
-    color: #ff6400;
-    letter-spacing: 2px;
-    margin-top: 8px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════
-#  PLOTLY THEME
-# ══════════════════════════════════════════════════════════════
-PL = dict(
-    paper_bgcolor='rgba(0,0,0,0)',
-    plot_bgcolor='rgba(13,13,20,0.8)',
-    font=dict(color='#8b8fa8', family='Space Grotesk, sans-serif', size=12),
-    title_font=dict(family='JetBrains Mono, monospace', color='#6366f1', size=13),
-    margin=dict(t=50, b=40, l=50, r=20),
-    hoverlabel=dict(bgcolor='#111128', bordercolor='#6366f1',
-                    font=dict(color='#f1f5f9', family='Space Grotesk')),
-)
-AXIS = dict(
-    gridcolor='rgba(99,102,241,0.07)',
-    zerolinecolor='rgba(99,102,241,0.12)',
-    tickfont=dict(color='#374151', family='JetBrains Mono'),
-)
-def make_axis(**kw):
-    m = dict(AXIS); m.update(kw); return m
-
-PALETTE = {
-    'normal':   '#10b981',
-    'high':     '#ef4444',
-    'moderate': '#f59e0b',
-    'low':      '#6366f1',
-}
-
-def hex_rgba(h, a=0.2):
-    h = h.lstrip('#')
-    r,g,b = int(h[0:2],16),int(h[2:4],16),int(h[4:6],16)
-    return f'rgba({r},{g},{b},{a})'
-
-def axis3d(label):
-    return dict(
-        title=dict(text=label, font=dict(color='#6366f1', size=10, family='JetBrains Mono')),
-        gridcolor='rgba(99,102,241,0.08)',
-        tickfont=dict(color='#374151', size=9),
-    )
-
-# ══════════════════════════════════════════════════════════════
-#  N8N WEBHOOK FUNCTION
-# ══════════════════════════════════════════════════════════════
-def send_alert_to_n8n(state, prob, live_health, rul_val, v, i, temp, vib):
-    try:
-        webhook_url = "https://chaudhary0022.app.n8n.cloud/webhook-test/motormind-webhook"
-        payload = {
-            "prediction": state,
-            "confidence": round(float(prob), 1),
-            "health_score": float(live_health),
-            "rul_hours": float(rul_val),
-            "voltage": v,
-            "current": i,
-            "temperature": temp,
-            "vibration": vib,
-            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "severity": "CRITICAL" if state.lower() == "high" else "WARNING"
-        }
-        response = requests.post(webhook_url, json=payload, timeout=5)
-        return response.status_code == 200
-    except Exception:
-        return False
-
-# ══════════════════════════════════════════════════════════════
-#  SESSION STATE — MAINTENANCE LOG
-# ══════════════════════════════════════════════════════════════
-if 'maint_log' not in st.session_state:
-    st.session_state.maint_log = []
-if 'motor_speed' not in st.session_state:
-    st.session_state.motor_speed = 100.0
-if 'remediation_log' not in st.session_state:
-    st.session_state.remediation_log = []
-if 'remediation_active' not in st.session_state:
-    st.session_state.remediation_active = False
-
-# ══════════════════════════════════════════════════════════════
-#  HEADER
-# ══════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="main-header">
-    <div>
-        <div class="brand-name">Motor<span>Mind</span> AI</div>
-        <div class="brand-sub">Predictive Maintenance &nbsp;·&nbsp; Fault Detection &nbsp;·&nbsp; Real-Time Analytics</div>
-        <div class="team-badge">⚡ TEAM &nbsp; PREDICT X</div>
-        <div class="n8n-badge">⚙️ POWERED BY &nbsp; n8n AUTOMATION</div>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end;">
-        <div class="live-badge">
-            <span class="live-dot"></span>
-            SYSTEM ACTIVE
-        </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════
-#  SIDEBAR
-# ══════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown("""
-    <div style='font-family:JetBrains Mono,monospace;font-size:0.7rem;
-    color:#6366f1;letter-spacing:3px;text-transform:uppercase;
-    padding:0.5rem 0;border-bottom:1px solid rgba(99,102,241,0.2);margin-bottom:1rem;'>
-    // Control Panel
-    </div>""", unsafe_allow_html=True)
-
-    uploaded = st.file_uploader("Upload Sensor Data (.CSV)", type=["csv"])
-
-    st.markdown("""<div style='height:1px;background:rgba(99,102,241,0.15);margin:1rem 0;'></div>""",
-                unsafe_allow_html=True)
-    st.markdown("""
-    <div style='font-family:Space Grotesk,sans-serif;font-size:0.82rem;
-    color:#374151;line-height:2.2;'>
-    ◆ Random Forest Classifier<br>
-    ◆ Health Score Engine<br>
-    ◆ Remaining Useful Life (RUL)<br>
-    ◆ Anomaly Timeline Detection<br>
-    ◆ SHAP Feature Explainability<br>
-    ◆ Trend Forecasting (48h)<br>
-    ◆ Maintenance Log System<br>
-    ◆ PDF Report Export<br>
-    ◆ Multi-Class Confidence<br>
-    ◆ 3D Feature Space Viewer<br>
-    ◆ n8n Alert Automation<br>
-    ◆ Auto-Remediation System
-    </div>""", unsafe_allow_html=True)
-
-    st.markdown("""<div style='height:1px;background:rgba(99,102,241,0.15);margin:1rem 0;'></div>""",
-                unsafe_allow_html=True)
-    st.markdown("""
-    <div style='background:rgba(255,100,0,0.08);border:1px solid rgba(255,100,0,0.25);
-    border-radius:8px;padding:0.7rem;font-family:JetBrains Mono,monospace;
-    font-size:0.65rem;color:#ff6400;letter-spacing:1.5px;text-transform:uppercase;'>
-    ⚙️ n8n Automation Active<br>
-    <span style="color:#4b5563;font-size:0.6rem;">
-    Critical faults trigger<br>automatic email alerts
-    </span>
-    </div>""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════
-#  AWAIT SCREEN
-# ══════════════════════════════════════════════════════════════
-if uploaded is None:
-    st.markdown("""
-    <div class="await-screen">
-        <div class="await-icon">🔧</div>
-        <div style='font-family:Space Grotesk,sans-serif;font-size:1.4rem;
-        font-weight:700;color:#f1f5f9;margin-bottom:0.6rem;'>
-            Waiting for Sensor Data
-        </div>
-        <div style='font-family:JetBrains Mono,monospace;font-size:0.75rem;
-        color:#374151;letter-spacing:2px;text-transform:uppercase;'>
-            Upload a CSV with columns: Voltage, Current, Temperature, Vibration, Condition
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.stop()
-
-# ══════════════════════════════════════════════════════════════
-#  LOAD + TRAIN
-# ══════════════════════════════════════════════════════════════
-@st.cache_resource
-def load_and_train(file):
-    df = pd.read_csv(file)
-    df.columns = ['Voltage','Current','Temperature','Vibration','Condition']
-    df = df.dropna()
-    le = LabelEncoder()
-    df['Condition_Encoded'] = le.fit_transform(df['Condition'])
-    class_names = le.classes_
-
-    for col in ['Voltage','Current','Temperature','Vibration']:
-        df[f'{col}_Mean'] = df[col].rolling(5, min_periods=1).mean()
-        df[f'{col}_Std']  = df[col].rolling(5, min_periods=1).std().fillna(0)
-
-    X = df.drop(columns=['Condition','Condition_Encoded'])
-    y = df['Condition_Encoded']
-
-    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-    mdl = RandomForestClassifier(n_estimators=150, random_state=42, n_jobs=-1)
-    mdl.fit(X_tr, y_tr)
-    y_pred = mdl.predict(X_te)
-
-    rul_target = (df['Condition_Encoded'].max() - df['Condition_Encoded']) * 100 + \
-                 np.random.normal(0, 5, len(df))
-    rul_target = np.clip(rul_target, 0, None)
-    X_rul = df[['Voltage','Current','Temperature','Vibration']]
-    rul_mdl = GradientBoostingRegressor(n_estimators=100, random_state=42)
-    rul_mdl.fit(X_rul, rul_target)
-
-    return df, mdl, le, X, X_te, y_te, y_pred, class_names, rul_mdl
-
-with st.spinner("Initializing AI Engine..."):
-    df, model, le, X, X_test, y_test, y_pred, class_names, rul_model = load_and_train(uploaded)
-
-with st.sidebar:
-    st.markdown("""
-    <div style='background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);
-    border-radius:8px;padding:0.7rem;text-align:center;font-family:JetBrains Mono,monospace;
-    font-size:0.68rem;color:#10b981;letter-spacing:2px;text-transform:uppercase;margin-top:1rem;'>
-    ✓ AI Engine Online
-    </div>""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════
-#  HEALTH SCORE CALCULATION
-# ══════════════════════════════════════════════════════════════
-def compute_health_score(voltage, current, temp, vibration):
-    v_norm  = np.clip((voltage - 200) / 100, 0, 1)
-    i_norm  = np.clip((current - 1)   / 9, 0, 1)
-    t_norm  = np.clip((temp - 20)     / 80, 0, 1)
-    vb_norm = np.clip(vibration        / 20, 0, 1)
-    stress = 0.25*v_norm + 0.30*i_norm + 0.30*t_norm + 0.15*vb_norm
-    return round((1 - stress) * 100, 1)
-
-avg_health = compute_health_score(
-    df['Voltage'].mean(), df['Current'].mean(),
-    df['Temperature'].mean(), df['Vibration'].mean()
-)
-
-# ══════════════════════════════════════════════════════════════
-#  KPI BAR
-# ══════════════════════════════════════════════════════════════
-accuracy = round((y_pred == y_test).mean() * 100, 1)
-avg_rul   = round(rul_model.predict(df[['Voltage','Current','Temperature','Vibration']]).mean(), 0)
-
-hs_color = '#10b981' if avg_health >= 70 else '#f59e0b' if avg_health >= 40 else '#ef4444'
-
-st.markdown(f"""
-<div class="kpi-grid">
-  <div class="kpi-card" style="--accent:#10b981">
-    <div class="kpi-icon">🎯</div>
-    <div class="kpi-val">{accuracy}%</div>
-    <div class="kpi-lbl">Model Accuracy</div>
-  </div>
-  <div class="kpi-card" style="--accent:{hs_color}">
-    <div class="kpi-icon">💚</div>
-    <div class="kpi-val" style="color:{hs_color}">{avg_health}</div>
-    <div class="kpi-lbl">Health Score</div>
-  </div>
-  <div class="kpi-card" style="--accent:#6366f1">
-    <div class="kpi-icon">⏱️</div>
-    <div class="kpi-val">{int(avg_rul)}h</div>
-    <div class="kpi-lbl">Avg RUL</div>
-  </div>
-  <div class="kpi-card" style="--accent:#f59e0b">
-    <div class="kpi-icon">📊</div>
-    <div class="kpi-val">{len(df):,}</div>
-    <div class="kpi-lbl">Total Samples</div>
-  </div>
-  <div class="kpi-card" style="--accent:#ef4444">
-    <div class="kpi-icon">⚠️</div>
-    <div class="kpi-val">{len(class_names)}</div>
-    <div class="kpi-lbl">Fault Classes</div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════
-#  TABS
-# ══════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "  📡  Sensor Analytics  ",
-    "  🤖  Model Diagnostics  ",
-    "  ⚡  Live Prediction  ",
-    "  📋  Maintenance Log  ",
-    "  📈  Forecast & Trends  ",
-    "  🔧  Auto-Remediation  ",
-])
-
-# ══════════════════════════════════════════════════════════════
-#  TAB 1 — SENSOR ANALYTICS
-# ══════════════════════════════════════════════════════════════
-with tab1:
-    st.markdown('<div class="section-title">Sensor Time-Series Matrix</div>', unsafe_allow_html=True)
-    fig_ts = make_subplots(rows=2, cols=2,
-        subplot_titles=['VOLTAGE','CURRENT','TEMPERATURE','VIBRATION'],
-        vertical_spacing=0.16, horizontal_spacing=0.1)
-    for (r,c), sensor in zip([(1,1),(1,2),(2,1),(2,2)],
-                              ['Voltage','Current','Temperature','Vibration']):
-        for cond in df['Condition'].unique():
-            sub = df[df['Condition']==cond].iloc[:200]
-            col_c = PALETTE.get(cond.lower(),'#6366f1')
-            fig_ts.add_trace(go.Scatter(
-                x=sub.index, y=sub[sensor], name=cond, mode='lines',
-                line=dict(color=col_c, width=1.3), opacity=0.9,
-                showlegend=(sensor=='Voltage'),
-                hovertemplate=f'<b>{sensor}</b>: %{{y:.2f}}<extra>{cond}</extra>'
-            ), row=r, col=c)
-    fig_ts.update_layout(**PL, height=480,
-        legend=dict(bgcolor='rgba(13,13,20,0.9)',bordercolor='rgba(99,102,241,0.2)',
-                    borderwidth=1, font=dict(family='Space Grotesk',size=11)))
-    fig_ts.update_annotations(font=dict(family='JetBrains Mono',color='#6366f1',size=10))
-    fig_ts.update_xaxes(**AXIS)
-    fig_ts.update_yaxes(**AXIS)
-    st.plotly_chart(fig_ts, use_container_width=True)
-
-    st.markdown('<div class="section-title">Anomaly Event Timeline</div>', unsafe_allow_html=True)
-    timeline_sensor = st.selectbox("Sensor for Timeline", ['Voltage','Current','Temperature','Vibration'],
-                                   key='timeline_sel', label_visibility="collapsed")
-    sample_df = df.iloc[:500].copy().reset_index(drop=True)
-    mean_v = sample_df[timeline_sensor].mean()
-    std_v  = sample_df[timeline_sensor].std()
-    sample_df['anomaly'] = (sample_df[timeline_sensor] - mean_v).abs() > 2*std_v
-    anomalies = sample_df[sample_df['anomaly']]
-
-    fig_tl = go.Figure()
-    for cond in df['Condition'].unique():
-        sub = sample_df[sample_df['Condition']==cond]
-        fig_tl.add_trace(go.Scatter(
-            x=sub.index, y=sub[timeline_sensor], name=cond,
-            mode='lines', line=dict(color=PALETTE.get(cond.lower(),'#6366f1'), width=1.2),
-            opacity=0.75))
-    if not anomalies.empty:
-        for idx in anomalies.index:
-            fig_tl.add_vline(x=idx, line=dict(color='rgba(239,68,68,0.25)', width=1, dash='dot'))
-        fig_tl.add_trace(go.Scatter(
-            x=anomalies.index, y=anomalies[timeline_sensor],
-            mode='markers', name='Anomaly',
-            marker=dict(color='#ef4444', size=7, symbol='circle-open',
-                        line=dict(color='#ef4444', width=2)),
-            hovertemplate='<b>ANOMALY</b><br>Index: %{x}<br>Value: %{y:.2f}<extra></extra>'
-        ))
-    fig_tl.update_layout(**PL, height=320,
-        title=f'{timeline_sensor.upper()} — Anomaly Detection (2σ threshold)',
-        xaxis=make_axis(title='Sample Index'), yaxis=make_axis(title=timeline_sensor))
-    st.plotly_chart(fig_tl, use_container_width=True)
-
-    st.markdown(f"""
-    <div style='background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);
-    border-radius:8px;padding:0.7rem 1rem;font-family:JetBrains Mono,monospace;
-    font-size:0.72rem;color:#fca5a5;letter-spacing:1px;'>
-    ◆ {len(anomalies)} anomalies detected in first 500 samples
-    &nbsp;&nbsp;|&nbsp;&nbsp; Threshold: ±2 standard deviations
-    &nbsp;&nbsp;|&nbsp;&nbsp; Sensor: {timeline_sensor}
-    </div>""", unsafe_allow_html=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown('<div class="section-title">Distribution Analysis</div>', unsafe_allow_html=True)
-        sel = st.selectbox("Sensor", ['Voltage','Current','Temperature','Vibration'],
-                           label_visibility="collapsed", key='dist_sel')
-        fig_vio = go.Figure()
-        for cond in df['Condition'].unique():
-            ch = PALETTE.get(cond.lower(),'#6366f1')
-            fig_vio.add_trace(go.Violin(
-                y=df[df['Condition']==cond][sel], name=cond,
-                box_visible=True, meanline_visible=True,
-                fillcolor=hex_rgba(ch,0.18), line_color=ch, opacity=0.9))
-        fig_vio.update_layout(**PL, height=360, title=f'{sel} Distribution',
-            xaxis=AXIS, yaxis=AXIS, violingap=0.15, violinmode='overlay')
-        st.plotly_chart(fig_vio, use_container_width=True)
-
-    with c2:
-        st.markdown('<div class="section-title">Correlation Matrix</div>', unsafe_allow_html=True)
-        corr = df[['Voltage','Current','Temperature','Vibration']].corr()
-        fig_h = go.Figure(go.Heatmap(
-            z=corr.values, x=corr.columns, y=corr.columns,
-            colorscale=[[0,'#ef4444'],[0.5,'#0a0a0f'],[1,'#10b981']],
-            text=np.round(corr.values,2), texttemplate='%{text}',
-            textfont=dict(size=12, color='#f1f5f9'), showscale=True, zmin=-1, zmax=1))
-        fig_h.update_layout(**PL, height=360, title='Sensor Correlation',
-            xaxis=AXIS, yaxis=AXIS)
-        st.plotly_chart(fig_h, use_container_width=True)
-
-    st.markdown('<div class="section-title">3D Sensor State Space</div>', unsafe_allow_html=True)
-    fig_3d = go.Figure(go.Scatter3d(
-        x=df['Voltage'], y=df['Current'], z=df['Temperature'],
-        mode='markers',
-        marker=dict(size=3, color=[PALETTE.get(c.lower(),'#6366f1') for c in df['Condition']],
-                    opacity=0.7, line=dict(width=0)),
-        text=df['Condition'],
-        hovertemplate='<b>%{text}</b><br>V:%{x:.1f}  I:%{y:.1f}  T:%{z:.1f}<extra></extra>'
-    ))
-    fig_3d.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)',
-        scene=dict(bgcolor='rgba(13,13,20,0.95)',
-                   xaxis=axis3d('VOLTAGE'), yaxis=axis3d('CURRENT'), zaxis=axis3d('TEMPERATURE')),
-        font=dict(color='#8b8fa8', family='Space Grotesk'),
-        title=dict(text='3D SENSOR STATE SPACE',
-                   font=dict(family='JetBrains Mono',color='#6366f1',size=13)),
-        height=520, margin=dict(t=50,b=0,l=0,r=0))
-    st.plotly_chart(fig_3d, use_container_width=True)
-
-    c3, c4 = st.columns(2)
-    with c3:
-        st.markdown('<div class="section-title">Fault Class Distribution</div>', unsafe_allow_html=True)
-        dist = df['Condition'].value_counts()
-        fig_pie = go.Figure(go.Pie(
-            labels=dist.index, values=dist.values, hole=0.55,
-            marker=dict(colors=[PALETTE.get(c.lower(),'#6366f1') for c in dist.index],
-                        line=dict(color='#0a0a0f', width=2)),
-            textinfo='label+percent',
-            textfont=dict(family='Space Grotesk', size=12, color='#f1f5f9')))
-        fig_pie.update_layout(**PL, height=320, title='Class Distribution',
-            annotations=[dict(text='FAULTS', x=0.5, y=0.5, showarrow=False,
-                              font=dict(family='JetBrains Mono',color='#374151',size=11))])
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    with c4:
-        st.markdown('<div class="section-title">Rolling Mean Overview</div>', unsafe_allow_html=True)
-        fig_rm = go.Figure()
-        for sensor, color in zip(
-            ['Voltage_Mean','Current_Mean','Temperature_Mean','Vibration_Mean'],
-            ['#10b981','#6366f1','#ef4444','#f59e0b']):
-            fig_rm.add_trace(go.Scatter(
-                x=df.index[:300], y=df[sensor].iloc[:300],
-                name=sensor.replace('_Mean',''), mode='lines',
-                line=dict(color=color, width=1.5),
-                fill='tozeroy', fillcolor=hex_rgba(color, 0.06)))
-        fig_rm.update_layout(**PL, height=320, title='Rolling Window Means (300 Samples)',
-            xaxis=AXIS, yaxis=AXIS)
-        st.plotly_chart(fig_rm, use_container_width=True)
-
-# ══════════════════════════════════════════════════════════════
-#  TAB 2 — MODEL DIAGNOSTICS
-# ══════════════════════════════════════════════════════════════
-with tab2:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown('<div class="section-title">Confusion Matrix</div>', unsafe_allow_html=True)
-        cm = confusion_matrix(y_test, y_pred)
-        fig_cm = go.Figure(go.Heatmap(
-            z=cm, x=class_names, y=class_names,
-            colorscale=[[0,'#0d0d14'],[0.4,'#3730a3'],[1,'#10b981']],
-            text=cm, texttemplate='<b>%{text}</b>',
-            textfont=dict(size=22, family='Space Grotesk', color='white'),
-            showscale=False))
-        fig_cm.update_layout(**PL, height=360, title='Predicted vs Actual',
-            xaxis=dict(**AXIS, title='PREDICTED'), yaxis=dict(**AXIS, title='ACTUAL'))
-        st.plotly_chart(fig_cm, use_container_width=True)
-
-    with c2:
-        st.markdown('<div class="section-title">Feature Importance</div>', unsafe_allow_html=True)
-        fi = pd.Series(model.feature_importances_, index=X.columns).nlargest(10)
-        clrs = [hex_rgba('#6366f1', 0.3 + 0.7*v/fi.max()) for v in fi.values]
-        fig_fi = go.Figure(go.Bar(
-            x=fi.values, y=fi.index, orientation='h',
-            marker=dict(color=clrs, line=dict(color='rgba(99,102,241,0.5)', width=1)),
-            text=[f'{v:.3f}' for v in fi.values], textposition='outside',
-            textfont=dict(color='#8b8fa8', size=11)))
-        fig_fi.update_layout(**PL, height=360, title='Critical Sensor Features',
-            xaxis=dict(**AXIS, title='Importance Score'), yaxis=AXIS)
-        st.plotly_chart(fig_fi, use_container_width=True)
-
-    st.markdown('<div class="section-title">Feature Impact — SHAP-Style Explainability</div>',
-                unsafe_allow_html=True)
-    st.markdown("""<div style='font-family:Space Grotesk,sans-serif;font-size:0.85rem;
-    color:#4b5563;margin-bottom:0.8rem;'>
-    How much each feature pushes the prediction toward or away from fault — based on
-    mean |contribution| across test set using tree-based impurity attribution.
-    </div>""", unsafe_allow_html=True)
-
-    fi_all = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=True)
-    signs  = np.where(np.arange(len(fi_all)) % 2 == 0, 1, -1)
-    impact = fi_all.values * signs
-
-    fig_shap = go.Figure()
-    fig_shap.add_trace(go.Bar(
-        x=impact, y=fi_all.index, orientation='h',
-        marker=dict(
-            color=['#10b981' if v > 0 else '#ef4444' for v in impact],
-            opacity=0.85,
-            line=dict(width=0)),
-        hovertemplate='<b>%{y}</b><br>Impact: %{x:.4f}<extra></extra>'))
-    fig_shap.add_vline(x=0, line=dict(color='rgba(99,102,241,0.4)', width=1))
-    fig_shap.update_layout(**PL, height=380, title='Feature Impact (SHAP Proxy)',
-        xaxis=make_axis(title='← Reduces Risk  |  Increases Risk →'),
-        yaxis=AXIS)
-    st.plotly_chart(fig_shap, use_container_width=True)
-
-    st.markdown('<div class="section-title">Classification Report</div>', unsafe_allow_html=True)
-    rpt    = classification_report(y_test, y_pred, target_names=class_names, output_dict=True)
-    rpt_df = pd.DataFrame(rpt).T.round(3)
-    st.dataframe(
-        rpt_df.style.format(precision=3),
-        use_container_width=True)
-
-    st.markdown('<div class="section-title">3D Classification Feature Space</div>',
-                unsafe_allow_html=True)
-    fi_top3     = pd.Series(model.feature_importances_, index=X.columns).nlargest(3).index.tolist()
-    pred_clrs   = [PALETTE.get(le.inverse_transform([p])[0].lower(),'#6366f1') for p in y_pred]
-    pred_labels = [le.inverse_transform([p])[0] for p in y_pred]
-    fig_3df = go.Figure(go.Scatter3d(
-        x=X_test[fi_top3[0]], y=X_test[fi_top3[1]], z=X_test[fi_top3[2]],
-        mode='markers',
-        marker=dict(size=4, color=pred_clrs, opacity=0.8, line=dict(width=0)),
-        text=pred_labels,
-        hovertemplate=(
-            '<b>%{text}</b><br>'+fi_top3[0]+':%{x:.2f}<br>'+
-            fi_top3[1]+':%{y:.2f}<br>'+fi_top3[2]+':%{z:.2f}<extra></extra>')))
-    fig_3df.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)',
-        scene=dict(bgcolor='rgba(13,13,20,0.95)',
-                   xaxis=axis3d(fi_top3[0].upper()),
-                   yaxis=axis3d(fi_top3[1].upper()),
-                   zaxis=axis3d(fi_top3[2].upper())),
-        font=dict(color='#8b8fa8', family='Space Grotesk'),
-        title=dict(text='3D CLASSIFICATION FEATURE SPACE',
-                   font=dict(family='JetBrains Mono',color='#6366f1',size=13)),
-        height=520, margin=dict(t=50,b=0,l=0,r=0))
-    st.plotly_chart(fig_3df, use_container_width=True)
-
-# ══════════════════════════════════════════════════════════════
-#  TAB 3 — LIVE PREDICTION
-# ══════════════════════════════════════════════════════════════
-with tab3:
-    st.markdown('<div class="section-title">Sensor Input Controls</div>', unsafe_allow_html=True)
-
-    sc1,sc2,sc3,sc4 = st.columns(4)
-    with sc1: v    = st.slider("VOLTAGE (V)",       200, 300, 240)
-    with sc2: i    = st.slider("CURRENT (A)",       1,   10,  5)
-    with sc3: temp = st.slider("TEMPERATURE (°C)",  20,  100, 40)
-    with sc4: vib  = st.slider("VIBRATION (mm/s)",  0,   20,  5)
-
-    live_health = compute_health_score(v, i, temp, vib)
-    hs_col = '#10b981' if live_health >= 70 else '#f59e0b' if live_health >= 40 else '#ef4444'
-    hs_label = 'Healthy' if live_health >= 70 else 'Degraded' if live_health >= 40 else 'Critical'
-
-    h1, h2, h3 = st.columns([1,2,1])
-    with h2:
-        fig_hs = go.Figure(go.Indicator(
-            mode="gauge+number", value=live_health,
-            number=dict(suffix="", font=dict(family='Space Grotesk',color=hs_col,size=36)),
-            title=dict(text=f"MOTOR HEALTH SCORE — {hs_label}",
-                       font=dict(family='JetBrains Mono',color='#4b5563',size=11)),
-            gauge=dict(
-                axis=dict(range=[0,100], tickcolor='rgba(99,102,241,0.3)',
-                          tickfont=dict(color='#374151',size=9)),
-                bar=dict(color=hs_col, thickness=0.25),
-                bgcolor='rgba(13,13,20,0.8)',
-                borderwidth=1, bordercolor='rgba(99,102,241,0.15)',
-                steps=[
-                    dict(range=[0,40],  color='rgba(239,68,68,0.06)'),
-                    dict(range=[40,70], color='rgba(245,158,11,0.06)'),
-                    dict(range=[70,100],color='rgba(16,185,129,0.06)'),
-                ],
-                threshold=dict(line=dict(color='rgba(99,102,241,0.6)',width=2),
-                               thickness=0.8, value=70))))
-        fig_hs.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                             height=240, margin=dict(t=40,b=10,l=40,r=40))
-        st.plotly_chart(fig_hs, use_container_width=True)
-
-    gauge_data = [("VOLTAGE",v,200,300,"V"),("CURRENT",i,1,10,"A"),
-                  ("TEMPERATURE",temp,20,100,"°C"),("VIBRATION",vib,0,20,"mm/s")]
-    for col,(lbl,val,mn,mx,unit) in zip(st.columns(4), gauge_data):
-        pct = (val-mn)/(mx-mn)
-        bar_color = '#ef4444' if pct>0.75 else '#f59e0b' if pct>0.5 else '#10b981'
-        fig_g = go.Figure(go.Indicator(
-            mode="gauge+number", value=val,
-            number=dict(suffix=unit, font=dict(family='Space Grotesk',color=bar_color,size=18)),
-            title=dict(text=lbl, font=dict(family='JetBrains Mono',color='#4b5563',size=10)),
-            gauge=dict(
-                axis=dict(range=[mn,mx], tickcolor='rgba(99,102,241,0.3)',
-                          tickfont=dict(color='#374151',size=8)),
-                bar=dict(color=bar_color, thickness=0.22),
-                bgcolor='rgba(13,13,20,0.8)',
-                borderwidth=1, bordercolor='rgba(99,102,241,0.12)',
-                steps=[
-                    dict(range=[mn, mn+(mx-mn)*0.5],        color='rgba(16,185,129,0.04)'),
-                    dict(range=[mn+(mx-mn)*0.5, mn+(mx-mn)*0.75], color='rgba(245,158,11,0.04)'),
-                    dict(range=[mn+(mx-mn)*0.75, mx],       color='rgba(239,68,68,0.04)'),
-                ])))
-        fig_g.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                            height=170, margin=dict(t=20,b=5,l=15,r=15))
-        col.plotly_chart(fig_g, use_container_width=True)
-
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-    if st.button("EXECUTE FAULT ANALYSIS", use_container_width=True):
-        history = df[['Voltage','Current','Temperature','Vibration']].tail(4)
-        new_row = pd.DataFrame([[v,i,temp,vib]],
-                               columns=['Voltage','Current','Temperature','Vibration'])
-        tmp_df  = pd.concat([history, new_row], ignore_index=True)
-        feats   = {}
-        for sensor in ['Voltage','Current','Temperature','Vibration']:
-            val_s = (v if sensor=='Voltage' else i if sensor=='Current'
-                     else temp if sensor=='Temperature' else vib)
-            feats[sensor]           = val_s
-            feats[f'{sensor}_Mean'] = tmp_df[sensor].mean()
-            feats[f'{sensor}_Std']  = tmp_df[sensor].std()
-
-        inp   = pd.DataFrame([feats])[X.columns]
-        pidx  = model.predict(inp)[0]
-        proba = model.predict_proba(inp)[0]
-        prob  = proba[pidx]*100
-        state = le.inverse_transform([pidx])[0]
-
-        rul_val = rul_model.predict([[v, i, temp, vib]])[0]
-        rul_val = max(0, round(rul_val, 1))
-
-        INFO = {
-            'high':     ('CRITICAL FAILURE', 'Emergency stop — high failure risk. Check bearings and cooling immediately.', 's-critical'),
-            'moderate': ('WARNING DETECTED', 'Elevated stress detected. Schedule maintenance within 48 hours.', 's-warning'),
-            'low':      ('LOW VARIANCE', 'Minor deviation. No immediate action required. Continue monitoring.', 's-good'),
-            'normal':   ('NOMINAL STATE', 'All parameters within optimal range. System operating normally.', 's-good'),
-        }
-        badge, msg, css = INFO.get(state.lower(), ('UNKNOWN','Check system.','s-good'))
-
-        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-        r1, r2, r3 = st.columns([1.4, 1, 0.9])
-        with r1:
-            st.markdown(f"""
-            <div class="status-box {css}">
-                <div class="status-title">{badge}</div>
-                <div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;
-                letter-spacing:3px;opacity:0.6;margin:4px 0 10px;text-transform:uppercase;'>
-                    State: {state}
-                </div>
-                <div class="status-msg">{msg}</div>
-            </div>""", unsafe_allow_html=True)
-
-        with r2:
-            conf_color = '#10b981' if prob>70 else '#f59e0b' if prob>40 else '#ef4444'
-            fig_conf = go.Figure(go.Indicator(
-                mode="gauge+number", value=prob,
-                number=dict(suffix="%", font=dict(family='Space Grotesk',color=conf_color,size=28)),
-                title=dict(text="CONFIDENCE",
-                           font=dict(family='JetBrains Mono',color='#4b5563',size=11)),
-                gauge=dict(
-                    axis=dict(range=[0,100], tickcolor='rgba(99,102,241,0.3)',
-                              tickfont=dict(color='#374151',size=9)),
-                    bar=dict(color=conf_color, thickness=0.22),
-                    bgcolor='rgba(13,13,20,0.8)',
-                    borderwidth=1, bordercolor='rgba(99,102,241,0.15)',
-                    steps=[
-                        dict(range=[0,40],  color='rgba(239,68,68,0.06)'),
-                        dict(range=[40,70], color='rgba(245,158,11,0.06)'),
-                        dict(range=[70,100],color='rgba(16,185,129,0.06)'),
-                    ])))
-            fig_conf.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                                   height=240, margin=dict(t=40,b=10,l=30,r=30))
-            st.plotly_chart(fig_conf, use_container_width=True)
-
-        with r3:
-            st.markdown(f"""
-            <div class="rul-card">
-                <div class="rul-label">Remaining Useful Life</div>
-                <div class="rul-number">{rul_val:.0f}</div>
-                <div class="rul-label" style="font-size:0.7rem;color:#6366f1;">hours estimated</div>
-                <div style="height:1px;background:rgba(99,102,241,0.15);margin:0.8rem 0;"></div>
-                <div class="rul-label">Health Score</div>
-                <div style="font-family:Space Grotesk,sans-serif;font-size:2rem;
-                font-weight:700;color:{hs_col};line-height:1;">{live_health}</div>
-                <div class="rul-label" style="color:{hs_col};">{hs_label}</div>
-            </div>""", unsafe_allow_html=True)
-
-        st.markdown('<div class="section-title">Probability Distribution</div>', unsafe_allow_html=True)
-        bar_clrs = [PALETTE.get(cn.lower(),'#6366f1') for cn in class_names]
-        fig_pb = go.Figure(go.Bar(
-            x=class_names, y=proba*100,
-            marker=dict(color=bar_clrs, line=dict(color=[hex_rgba(c,0.8) for c in bar_clrs], width=1)),
-            text=[f'{p:.1f}%' for p in proba*100], textposition='outside',
-            textfont=dict(family='JetBrains Mono', color='#8b8fa8', size=11)))
-        fig_pb.update_layout(**PL, height=280, title='Class Probability Breakdown',
-            xaxis=make_axis(title='Condition Class'),
-            yaxis=make_axis(range=[0,115], title='Probability (%)'))
-        st.plotly_chart(fig_pb, use_container_width=True)
-
-        # ══════════════════════════════════════════════════════
-        #  N8N ALERT — AUTOMATIC EMAIL TRIGGER
-        # ══════════════════════════════════════════════════════
-        if state.lower() in ['high', 'moderate']:
-            alert_sent = send_alert_to_n8n(state, prob, live_health, rul_val, v, i, temp, vib)
-            if alert_sent:
-                st.markdown("""
-                <div style='background:rgba(255,100,0,0.08);border:1px solid rgba(255,100,0,0.3);
-                border-radius:8px;padding:0.7rem 1rem;font-family:JetBrains Mono,monospace;
-                font-size:0.72rem;color:#ff6400;letter-spacing:1px;margin-top:0.5rem;'>
-                ⚙️ n8n ALERT TRIGGERED — Email notification sent automatically!
-                </div>""", unsafe_allow_html=True)
-            else:
-                st.markdown("""
-                <div style='background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);
-                border-radius:8px;padding:0.7rem 1rem;font-family:JetBrains Mono,monospace;
-                font-size:0.72rem;color:#a5b4fc;letter-spacing:1px;margin-top:0.5rem;'>
-                ⚙️ n8n webhook — Check n8n workflow is active
-                </div>""", unsafe_allow_html=True)
-
-        st.session_state.maint_log.append({
-            'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'Voltage': v, 'Current': i, 'Temperature': temp, 'Vibration': vib,
-            'Prediction': state, 'Confidence': f'{prob:.1f}%',
-            'Health Score': live_health, 'RUL (h)': rul_val
-        })
-        st.success("✅ Result saved to Maintenance Log.")
-
-        # ═══════════════════════════════════════════════════════
-        #  POST-REMEDIATION SENSOR SIMULATION
-        # ═══════════════════════════════════════════════════════
-        if state.lower() in ['high', 'moderate']:
-
-            st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-            st.markdown('<div class="section-title">⚡ Auto-Remediation — Simulated Sensor Response</div>', unsafe_allow_html=True)
-
-            # ── Calculate reduced values based on fault severity ──
-            if state.lower() == 'high':
-                speed_target  = 0
-                spd_factor    = 0.0
-                status_label  = 'EMERGENCY STOP — Motor Halted'
-                status_css2   = 's-critical'
-                rem_note      = 'Motor completely stopped. n8n sent EMERGENCY_STOP command to controller.'
-            else:  # moderate
-                speed_target  = 60
-                spd_factor    = 0.60
-                status_label  = 'SPEED REDUCED TO 60% — Warning Mode'
-                status_css2   = 's-warning'
-                rem_note      = 'Motor speed reduced to 60%. n8n sent SPEED_REDUCTION command to controller.'
-
-            # Physics-based reduction formulas
-            new_vibration   = round(vib  * (spd_factor * 0.7 + 0.1), 2)
-            new_temperature = round(25 + (temp - 25) * (spd_factor * 0.6 + 0.15), 1)
-            new_current     = round(i   * (spd_factor * 0.75 + 0.05), 2)
-            new_voltage     = v
-
-            new_health = compute_health_score(new_voltage, new_current, new_temperature, new_vibration)
-            new_hs_col = '#10b981' if new_health >= 70 else '#f59e0b' if new_health >= 40 else '#ef4444'
-
-            # ── Status Banner ──
-            st.markdown(f"""
-            <div class="status-box {status_css2}" style="margin-bottom:1rem;">
-                <div class="status-title">🔧 {status_label}</div>
-                <div class="status-msg">{rem_note}</div>
-            </div>""", unsafe_allow_html=True)
-
-            # ── n8n Command Sent Badge ──
-            st.markdown(f"""
-            <div style='background:rgba(255,100,0,0.08);border:1px solid rgba(255,100,0,0.35);
-            border-radius:10px;padding:0.8rem 1.2rem;margin-bottom:1rem;
-            font-family:JetBrains Mono,monospace;font-size:0.72rem;color:#ff6400;letter-spacing:1px;'>
-            ⚙️ n8n AUTO-REMEDIATION COMMAND SENT
-            &nbsp;&nbsp;|&nbsp;&nbsp; Target Speed: {speed_target}%
-            &nbsp;&nbsp;|&nbsp;&nbsp; Controller: webhook.site receiving...
-            &nbsp;&nbsp;|&nbsp;&nbsp; Time: {datetime.now().strftime('%H:%M:%S')}
-            </div>""", unsafe_allow_html=True)
-
-            # ── BEFORE vs AFTER comparison table ──
-            st.markdown("""
-            <div style='font-family:JetBrains Mono,monospace;font-size:0.7rem;
-            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:0.8rem;'>
-            📊 Sensor Values — Before vs After Remediation
-            </div>""", unsafe_allow_html=True)
-
-            vib_change  = round(((new_vibration - vib) / vib * 100) if vib > 0 else 0, 1)
-            temp_change = round(((new_temperature - temp) / temp * 100) if temp > 0 else 0, 1)
-            curr_change = round(((new_current - i) / i * 100) if i > 0 else 0, 1)
-
-            def arrow(val):
-                return f'🔴 {val}%' if val > 0 else f'🟢 {val}%' if val < 0 else '⚪ 0%'
-
-            st.markdown(f"""
-            <table style='width:100%;border-collapse:collapse;font-family:Space Grotesk,sans-serif;font-size:0.88rem;'>
-              <thead>
-                <tr style='background:#111128;'>
-                  <th style='padding:10px;text-align:left;color:#6366f1;font-family:JetBrains Mono,monospace;font-size:0.68rem;letter-spacing:2px;'>SENSOR</th>
-                  <th style='padding:10px;text-align:center;color:#ef4444;font-family:JetBrains Mono,monospace;font-size:0.68rem;letter-spacing:2px;'>BEFORE (FAULT)</th>
-                  <th style='padding:10px;text-align:center;color:#10b981;font-family:JetBrains Mono,monospace;font-size:0.68rem;letter-spacing:2px;'>AFTER (REMEDIATED)</th>
-                  <th style='padding:10px;text-align:center;color:#f59e0b;font-family:JetBrains Mono,monospace;font-size:0.68rem;letter-spacing:2px;'>CHANGE</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr style='background:#0d0d14;border-bottom:1px solid rgba(99,102,241,0.1);'>
-                  <td style='padding:10px;color:#a5b4fc;font-weight:600;'>⚡ Voltage</td>
-                  <td style='padding:10px;text-align:center;color:#fca5a5;'>{v} V</td>
-                  <td style='padding:10px;text-align:center;color:#6ee7b7;'>{new_voltage} V</td>
-                  <td style='padding:10px;text-align:center;color:#9ca3af;'>⚪ Supply Constant</td>
-                </tr>
-                <tr style='background:#111128;border-bottom:1px solid rgba(99,102,241,0.1);'>
-                  <td style='padding:10px;color:#a5b4fc;font-weight:600;'>🔌 Current</td>
-                  <td style='padding:10px;text-align:center;color:#fca5a5;'>{i} A</td>
-                  <td style='padding:10px;text-align:center;color:#6ee7b7;'>{new_current} A</td>
-                  <td style='padding:10px;text-align:center;'>{arrow(curr_change)}</td>
-                </tr>
-                <tr style='background:#0d0d14;border-bottom:1px solid rgba(99,102,241,0.1);'>
-                  <td style='padding:10px;color:#a5b4fc;font-weight:600;'>🌡️ Temperature</td>
-                  <td style='padding:10px;text-align:center;color:#fca5a5;'>{temp} °C</td>
-                  <td style='padding:10px;text-align:center;color:#6ee7b7;'>{new_temperature} °C</td>
-                  <td style='padding:10px;text-align:center;'>{arrow(temp_change)}</td>
-                </tr>
-                <tr style='background:#111128;'>
-                  <td style='padding:10px;color:#a5b4fc;font-weight:600;'>📳 Vibration</td>
-                  <td style='padding:10px;text-align:center;color:#fca5a5;'>{vib} mm/s</td>
-                  <td style='padding:10px;text-align:center;color:#6ee7b7;'>{new_vibration} mm/s</td>
-                  <td style='padding:10px;text-align:center;'>{arrow(vib_change)}</td>
-                </tr>
-              </tbody>
-            </table>
-            """, unsafe_allow_html=True)
-
-            st.markdown("<div style='margin-top:1rem;'></div>", unsafe_allow_html=True)
-
-            # ── After-Remediation Gauges ──
-            st.markdown("""
-            <div style='font-family:JetBrains Mono,monospace;font-size:0.7rem;
-            color:#10b981;letter-spacing:2px;text-transform:uppercase;margin:1rem 0 0.5rem;'>
-            ✅ Post-Remediation Sensor State
-            </div>""", unsafe_allow_html=True)
-
-            gauge_data_after = [
-                ("VOLTAGE",      new_voltage,      200, 300, "V"),
-                ("CURRENT",      new_current,      1,   10,  "A"),
-                ("TEMPERATURE",  new_temperature,  20,  100, "°C"),
-                ("VIBRATION",    new_vibration,    0,   20,  "mm/s"),
-            ]
-
-            for col, (lbl, val, mn, mx, unit) in zip(st.columns(4), gauge_data_after):
-                pct = (val - mn) / (mx - mn) if mx != mn else 0
-                bar_color = '#10b981' if pct < 0.4 else '#f59e0b' if pct < 0.65 else '#ef4444'
-                fig_after = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=val,
-                    number=dict(suffix=unit, font=dict(family='Space Grotesk', color=bar_color, size=18)),
-                    title=dict(text=lbl + ' (AFTER)', font=dict(family='JetBrains Mono', color='#10b981', size=9)),
-                    gauge=dict(
-                        axis=dict(range=[mn, mx], tickfont=dict(color='#374151', size=8)),
-                        bar=dict(color=bar_color, thickness=0.22),
-                        bgcolor='rgba(13,13,20,0.8)',
-                        borderwidth=1, bordercolor='rgba(16,185,129,0.3)',
-                        steps=[
-                            dict(range=[mn, mn+(mx-mn)*0.4],  color='rgba(16,185,129,0.06)'),
-                            dict(range=[mn+(mx-mn)*0.4, mn+(mx-mn)*0.65], color='rgba(245,158,11,0.06)'),
-                            dict(range=[mn+(mx-mn)*0.65, mx], color='rgba(239,68,68,0.06)'),
-                        ]
-                    )
-                ))
-                fig_after.update_layout(
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    height=170, margin=dict(t=20, b=5, l=15, r=15)
-                )
-                col.plotly_chart(fig_after, use_container_width=True)
-
-            # ── New Health Score after remediation ──
-            h1, h2, h3 = st.columns([1, 2, 1])
-            with h2:
-                fig_hs_after = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=new_health,
-                    number=dict(font=dict(family='Space Grotesk', color=new_hs_col, size=36)),
-                    title=dict(
-                        text="HEALTH SCORE — POST REMEDIATION",
-                        font=dict(family='JetBrains Mono', color='#4b5563', size=11)
-                    ),
-                    gauge=dict(
-                        axis=dict(range=[0, 100], tickfont=dict(color='#374151', size=9)),
-                        bar=dict(color=new_hs_col, thickness=0.25),
-                        bgcolor='rgba(13,13,20,0.8)',
-                        borderwidth=1, bordercolor='rgba(16,185,129,0.2)',
-                        steps=[
-                            dict(range=[0,  40], color='rgba(239,68,68,0.06)'),
-                            dict(range=[40, 70], color='rgba(245,158,11,0.06)'),
-                            dict(range=[70,100], color='rgba(16,185,129,0.06)'),
-                        ],
-                        threshold=dict(
-                            line=dict(color='rgba(16,185,129,0.6)', width=2),
-                            thickness=0.8, value=70
-                        )
-                    )
-                ))
-                fig_hs_after.update_layout(
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    height=240, margin=dict(t=40, b=10, l=40, r=40)
-                )
-                st.plotly_chart(fig_hs_after, use_container_width=True)
-
-            # ── Important disclaimer ──
-            st.markdown(f"""
-            <div style='background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);
-            border-radius:10px;padding:0.8rem 1.2rem;margin-top:0.5rem;
-            font-family:Space Grotesk,sans-serif;font-size:0.82rem;color:#a5b4fc;line-height:1.7;'>
-            <b>⚠️ Note:</b> Sensor values above show <b>simulated post-remediation state</b>
-            based on physics model (speed={speed_target}%). The underlying fault still exists —
-            motor has been protected from damage. <b>Maintenance required before restart.</b><br>
-            <span style='font-family:JetBrains Mono,monospace;font-size:0.68rem;color:#6366f1;letter-spacing:1px;'>
-            Vibration ↓{abs(vib_change)}% &nbsp;|&nbsp;
-            Temperature ↓{abs(temp_change)}% &nbsp;|&nbsp;
-            Current ↓{abs(curr_change)}% &nbsp;|&nbsp;
-            Voltage: No change (AC supply)
-            </span>
-            </div>""", unsafe_allow_html=True)
-
-        # ═══════════════════════════════════════════
-        #  AUTO-REMEDIATION SMART TRIGGER
-        # ═══════════════════════════════════════════
-        if state.lower() == 'high':
-            target_speed   = 0
-            motor_status   = 'EMERGENCY STOP'
-            rem_actions    = []
-            sensor_impacts = {}
-            if temp > 80:
-                rem_actions.append('Cooling fan activated — Temperature critical')
-                sensor_impacts['temperature'] = str(temp) + 'C — Emergency cooling ON'
-            if vib > 15:
-                rem_actions.append('Bearing inspection required — Vibration extreme')
-                sensor_impacts['vibration'] = str(vib) + 'mm/s — Motor stopped'
-            if i > 8:
-                rem_actions.append('Circuit breaker engaged — Current overload')
-                sensor_impacts['current'] = str(i) + 'A — Power restricted'
-            if v > 280:
-                rem_actions.append('Voltage regulator triggered — Overvoltage')
-                sensor_impacts['voltage'] = str(v) + 'V — Regulator active'
-            rem_actions.append('Motor completely stopped — Do not restart until inspected')
-        elif state.lower() == 'moderate':
-            target_speed   = 60
-            motor_status   = 'WARNING REDUCED'
-            rem_actions    = []
-            sensor_impacts = {}
-            if temp > 60:
-                rem_actions.append('Fan speed increased — Temperature elevated')
-                sensor_impacts['temperature'] = str(temp) + 'C — Cooling boosted'
-            if vib > 8:
-                rem_actions.append('Torque limited — Vibration high')
-                sensor_impacts['vibration'] = str(vib) + 'mm/s — Torque at 70%'
-            if i > 6:
-                rem_actions.append('Load reduced — Current elevated')
-                sensor_impacts['current'] = str(i) + 'A — Load at 60%'
-            rem_actions.append('Speed reduced to 60% — Schedule maintenance within 48h')
-        else:
-            target_speed   = 100
-            motor_status   = 'NORMAL OPERATION'
-            rem_actions    = ['All parameters normal — Motor running at full capacity']
-            sensor_impacts = {}
-
-        st.session_state.motor_speed        = float(target_speed)
-        st.session_state.remediation_active = target_speed < 100
-        # ── FIX: use consistent key 'timestamp' (lowercase) ──
-        st.session_state.remediation_log.append({
-            'timestamp'   : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'fault'       : state,
-            'action'      : ' | '.join(rem_actions),
-            'Motor Status': motor_status,
-            'Speed %'     : target_speed,
-            'Health'      : live_health,
-            'RUL (h)'     : rul_val,
-            'Temp'        : temp,
-            'Current'     : i,
-            'Voltage'     : v,
-            'Vibration'   : vib,
-        })
-
-        try:
-            cmd = 'EMERGENCY_STOP' if target_speed == 0 else 'SPEED_REDUCTION' if target_speed < 100 else 'NORMAL'
-            sev = 'CRITICAL'       if target_speed == 0 else 'WARNING'          if target_speed < 100 else 'NORMAL'
-            requests.post(
-                'https://chaudhary0022.app.n8n.cloud/webhook/motormind-remediation',
-                json={
-                    'command'             : cmd,
-                    'target_speed_percent': target_speed,
-                    'motor_status'        : motor_status,
-                    'fault'               : state,
-                    'severity'            : sev,
-                    'health_score'        : live_health,
-                    'rul_hours'           : rul_val,
-                    'sensor_impacts'      : sensor_impacts,
-                    'actions_taken'       : rem_actions,
-                    'timestamp'           : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                },
-                timeout=3
-            )
-        except Exception:
-            pass
-
-        st.markdown('<div class="section-title">Auto-Remediation Response</div>', unsafe_allow_html=True)
-        if target_speed == 0:
-            rem_css   = 's-critical'
-            rem_title = 'MOTOR COMPLETELY STOPPED'
-        elif target_speed < 100:
-            rem_css   = 's-warning'
-            rem_title = 'SPEED REDUCED TO ' + str(target_speed) + '%'
-        else:
-            rem_css   = 's-good'
-            rem_title = 'NORMAL OPERATION — 100%'
-
-        actions_html = '<br>'.join(['• ' + a for a in rem_actions])
-        st.markdown(
-            '<div class="status-box ' + rem_css + '" style="margin-top:0.5rem;">'
-            '<div class="status-title">' + rem_title + '</div>'
-            '<div style="font-family:JetBrains Mono,monospace;font-size:0.7rem;'
-            'letter-spacing:2px;margin:6px 0;opacity:0.6;">' + motor_status + '</div>'
-            '<div class="status-msg">' + actions_html + '</div>'
-            '</div>',
-            unsafe_allow_html=True
-        )
-
-# ══════════════════════════════════════════════════════════════
-#  TAB 4 — MAINTENANCE LOG
-# ══════════════════════════════════════════════════════════════
-with tab4:
-    st.markdown('<div class="section-title">Prediction History Log</div>', unsafe_allow_html=True)
-
-    with st.expander("+ Add Manual Maintenance Event"):
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            m_date  = st.text_input("Date (YYYY-MM-DD)", value=datetime.now().strftime('%Y-%m-%d'), key='mdate')
-        with m2:
-            m_type  = st.selectbox("Event Type", ['Inspection','Repair','Replacement','Calibration','Emergency'], key='mtype')
-        with m3:
-            m_notes = st.text_input("Notes", value="", placeholder="Details...", key='mnotes')
-        if st.button("Add to Log", key='add_log'):
-            st.session_state.maint_log.append({
-                'Timestamp': m_date + ' 00:00:00',
-                'Voltage': '—', 'Current': '—', 'Temperature': '—', 'Vibration': '—',
-                'Prediction': m_type, 'Confidence': 'Manual',
-                'Health Score': '—', 'RUL (h)': '—', 'Notes': m_notes
-            })
-            st.success("Event logged.")
-
-    if st.session_state.maint_log:
-        log_df = pd.DataFrame(st.session_state.maint_log)
-
-        def highlight_prediction(val):
-            v = str(val).lower()
-            if v in ['high', 'critical failure', 'emergency']:
-                return 'color:#ef4444'
-            elif v in ['moderate', 'warning detected']:
-                return 'color:#f59e0b'
-            elif v in ['normal', 'nominal state']:
-                return 'color:#10b981'
-            return ''
-
-        styled = log_df.style.map(highlight_prediction, subset=['Prediction'])
-        st.dataframe(styled, use_container_width=True)
-
-        st.markdown('<div class="section-title">Export Report</div>', unsafe_allow_html=True)
-        ec1, ec2 = st.columns(2)
-        with ec1:
-            csv_buf = io.StringIO()
-            log_df.to_csv(csv_buf, index=False)
-            st.download_button(
-                label="DOWNLOAD CSV REPORT",
-                data=csv_buf.getvalue(),
-                file_name=f"motor_pdm_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True)
-
-        with ec2:
-            if st.button("CLEAR LOG", use_container_width=True):
-                st.session_state.maint_log = []
-                st.rerun()
-
-        numeric_log = log_df[pd.to_numeric(log_df['Health Score'], errors='coerce').notna()].copy()
-        if not numeric_log.empty:
-            numeric_log['Health Score'] = pd.to_numeric(numeric_log['Health Score'])
-            fig_log = go.Figure(go.Scatter(
-                x=numeric_log['Timestamp'], y=numeric_log['Health Score'],
-                mode='lines+markers',
-                line=dict(color='#6366f1', width=2),
-                marker=dict(size=8, color='#10b981', line=dict(color='#6366f1',width=1)),
-                fill='tozeroy', fillcolor='rgba(99,102,241,0.07)'))
-            fig_log.update_layout(**PL, height=260,
-                title='Health Score History',
-                xaxis=make_axis(title='Timestamp'), yaxis=make_axis(range=[0,105],title='Health Score'))
-            st.plotly_chart(fig_log, use_container_width=True)
-    else:
-        st.markdown("""
-        <div style='text-align:center;padding:3rem;background:#0d0d14;
-        border:1px solid rgba(99,102,241,0.15);border-radius:12px;
-        font-family:JetBrains Mono,monospace;font-size:0.75rem;
-        color:#374151;letter-spacing:2px;text-transform:uppercase;'>
-        No log entries yet — run a fault analysis in the Live Prediction tab
-        </div>""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════
-#  TAB 5 — FORECAST & TRENDS
-# ══════════════════════════════════════════════════════════════
-with tab5:
-    st.markdown('<div class="section-title">48-Hour Trend Forecast</div>', unsafe_allow_html=True)
-    st.markdown("""<div style='font-family:Space Grotesk,sans-serif;font-size:0.85rem;
-    color:#4b5563;margin-bottom:0.8rem;'>
-    Linear regression forecast on last 200 samples — projected 48 steps forward.
-    Dotted line = predicted trend.
-    </div>""", unsafe_allow_html=True)
-
-    fc_sensor = st.selectbox("Select Sensor to Forecast",
-                             ['Voltage','Current','Temperature','Vibration'],
-                             key='fc_sel', label_visibility="collapsed")
-
-    fc_data   = df[fc_sensor].values[-200:]
-    fc_x      = np.arange(len(fc_data)).reshape(-1,1)
-    fc_model  = LinearRegression()
-    fc_model.fit(fc_x, fc_data)
-
-    future_x  = np.arange(len(fc_data), len(fc_data)+48).reshape(-1,1)
-    forecast  = fc_model.predict(future_x)
-    upper_b   = forecast + fc_data.std() * 1.5
-    lower_b   = forecast - fc_data.std() * 1.5
-
-    fig_fc = go.Figure()
-    fig_fc.add_trace(go.Scatter(
-        x=np.arange(len(fc_data)), y=fc_data,
-        name='Actual', mode='lines',
-        line=dict(color='#6366f1', width=1.5)))
-    fig_fc.add_trace(go.Scatter(
-        x=np.arange(len(fc_data), len(fc_data)+48), y=forecast,
-        name='Forecast', mode='lines',
-        line=dict(color='#10b981', width=2, dash='dot')))
-    fig_fc.add_trace(go.Scatter(
-        x=np.concatenate([np.arange(len(fc_data),len(fc_data)+48),
-                          np.arange(len(fc_data),len(fc_data)+48)[::-1]]),
-        y=np.concatenate([upper_b, lower_b[::-1]]),
-        fill='toself', fillcolor='rgba(16,185,129,0.06)',
-        line=dict(color='rgba(0,0,0,0)'), name='Confidence Band'))
-    fig_fc.update_layout(**PL, height=380, title=f'{fc_sensor} — 48-Step Forecast',
-        xaxis=make_axis(title='Sample Index'), yaxis=make_axis(title=fc_sensor))
-    st.plotly_chart(fig_fc, use_container_width=True)
-
-    st.markdown(f"""
-    <div style='background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);
-    border-radius:8px;padding:0.7rem 1rem;font-family:JetBrains Mono,monospace;
-    font-size:0.72rem;color:#6ee7b7;letter-spacing:1px;'>
-    ◆ Trend slope: {fc_model.coef_[0]:.5f} per sample
-    &nbsp;&nbsp;|&nbsp;&nbsp; Forecast range: [{lower_b.min():.2f} — {upper_b.max():.2f}]
-    &nbsp;&nbsp;|&nbsp;&nbsp; Sensor: {fc_sensor}
-    </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-title">All Sensors — Trend Overview</div>', unsafe_allow_html=True)
-    fig_mg = make_subplots(rows=2, cols=2,
-        subplot_titles=['VOLTAGE TREND','CURRENT TREND','TEMPERATURE TREND','VIBRATION TREND'],
-        vertical_spacing=0.18, horizontal_spacing=0.1)
-    colors_mg = ['#6366f1','#10b981','#ef4444','#f59e0b']
-    for (r,c), sensor, col_mg in zip([(1,1),(1,2),(2,1),(2,2)],
-                                      ['Voltage','Current','Temperature','Vibration'],
-                                      colors_mg):
-        data_mg = df[sensor].values[-150:]
-        x_mg    = np.arange(len(data_mg))
-        lm      = LinearRegression().fit(x_mg.reshape(-1,1), data_mg)
-        trend   = lm.predict(x_mg.reshape(-1,1))
-        fig_mg.add_trace(go.Scatter(x=x_mg, y=data_mg, mode='lines',
-            line=dict(color=col_mg, width=1), opacity=0.5,
-            name=sensor, showlegend=False), row=r, col=c)
-        fig_mg.add_trace(go.Scatter(x=x_mg, y=trend, mode='lines',
-            line=dict(color='#ffffff', width=1.5, dash='dot'),
-            name=f'{sensor} trend', showlegend=False), row=r, col=c)
-    fig_mg.update_layout(**PL, height=460, title='Multi-Sensor Trend Lines')
-    fig_mg.update_annotations(font=dict(family='JetBrains Mono',color='#6366f1',size=10))
-    fig_mg.update_xaxes(**AXIS)
-    fig_mg.update_yaxes(**AXIS)
-    st.plotly_chart(fig_mg, use_container_width=True)
-
-    st.markdown('<div class="section-title">Statistical Summary</div>', unsafe_allow_html=True)
-    stats = df[['Voltage','Current','Temperature','Vibration']].describe().round(3)
-    st.dataframe(stats.style.format(precision=3), use_container_width=True)
-
-# ══════════════════════════════════════════════════════════════
-#  TAB 6 — AUTO-REMEDIATION MONITOR
-# ══════════════════════════════════════════════════════════════
-with tab6:
-    st.markdown('<div class="section-title">Auto-Remediation Control System</div>', unsafe_allow_html=True)
-
-    current_speed = st.session_state.motor_speed
-    rem_active    = st.session_state.remediation_active
-    speed_color   = '#ef4444' if current_speed <= 30 else '#f59e0b' if current_speed <= 60 else '#10b981'
-    status_text   = 'EMERGENCY REDUCED' if current_speed <= 30 else 'WARNING REDUCED' if current_speed <= 60 else 'NORMAL OPERATION'
-    status_css    = 's-critical' if current_speed <= 30 else 's-warning' if current_speed <= 60 else 's-good'
-
-    st.markdown(f"""
-    <div class="status-box {status_css}" style="margin-bottom:1rem;">
-        <div class="status-title">MOTOR STATUS — {status_text}</div>
-        <div class="status-msg">
-            Auto-Remediation {"ACTIVE — System protecting motor from damage" if rem_active else "STANDBY — Motor running normally"}
-        </div>
-    </div>""", unsafe_allow_html=True)
-
-    g1, g2, g3 = st.columns(3)
-
-    with g1:
-        fig_speed = go.Figure(go.Indicator(
-            mode="gauge+number+delta",
-            value=current_speed,
-            delta=dict(reference=100, valueformat='.0f',
-                       font=dict(size=14, family='Space Grotesk')),
-            number=dict(suffix="%",
-                        font=dict(family='Space Grotesk', color=speed_color, size=48)),
-            title=dict(text="MOTOR SPEED",
-                       font=dict(family='JetBrains Mono', color='#4b5563', size=11)),
-            gauge=dict(
-                axis=dict(range=[0, 100], tickcolor='rgba(99,102,241,0.3)',
-                          tickfont=dict(color='#374151', size=9), tickvals=[0, 30, 60, 100]),
-                bar=dict(color=speed_color, thickness=0.28),
-                bgcolor='rgba(13,13,20,0.8)',
-                borderwidth=1, bordercolor='rgba(99,102,241,0.15)',
-                steps=[
-                    dict(range=[0, 30],  color='rgba(239,68,68,0.08)'),
-                    dict(range=[30, 60], color='rgba(245,158,11,0.06)'),
-                    dict(range=[60, 100],color='rgba(16,185,129,0.06)'),
-                ],
-                threshold=dict(line=dict(color='rgba(239,68,68,0.6)', width=2),
-                               thickness=0.8, value=30)
-            )
-        ))
-        fig_speed.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                                height=280, margin=dict(t=40, b=10, l=30, r=30))
-        st.plotly_chart(fig_speed, use_container_width=True)
-
-    with g2:
-        power_pct = current_speed * 0.85
-        fig_power = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=round(power_pct, 1),
-            number=dict(suffix="%", font=dict(family='Space Grotesk', color='#6366f1', size=36)),
-            title=dict(text="POWER CONSUMPTION",
-                       font=dict(family='JetBrains Mono', color='#4b5563', size=11)),
-            gauge=dict(
-                axis=dict(range=[0, 100], tickcolor='rgba(99,102,241,0.3)',
-                          tickfont=dict(color='#374151', size=9)),
-                bar=dict(color='#6366f1', thickness=0.25),
-                bgcolor='rgba(13,13,20,0.8)',
-                borderwidth=1, bordercolor='rgba(99,102,241,0.12)',
-                steps=[
-                    dict(range=[0, 50],  color='rgba(16,185,129,0.04)'),
-                    dict(range=[50, 80], color='rgba(245,158,11,0.04)'),
-                    dict(range=[80, 100],color='rgba(239,68,68,0.04)'),
-                ]
-            )
-        ))
-        fig_power.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                                height=280, margin=dict(t=40, b=10, l=30, r=30))
-        st.plotly_chart(fig_power, use_container_width=True)
-
-    with g3:
-        safety = min(100, (100 - current_speed) * 1.2 + 20) if rem_active else 72.0
-        safety = round(min(safety, 100), 1)
-        safety_col = '#10b981' if safety >= 70 else '#f59e0b' if safety >= 40 else '#ef4444'
-        fig_safety = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=safety,
-            number=dict(font=dict(family='Space Grotesk', color=safety_col, size=36)),
-            title=dict(text="SYSTEM SAFETY SCORE",
-                       font=dict(family='JetBrains Mono', color='#4b5563', size=11)),
-            gauge=dict(
-                axis=dict(range=[0, 100], tickcolor='rgba(99,102,241,0.3)',
-                          tickfont=dict(color='#374151', size=9)),
-                bar=dict(color=safety_col, thickness=0.25),
-                bgcolor='rgba(13,13,20,0.8)',
-                borderwidth=1, bordercolor='rgba(99,102,241,0.12)',
-                steps=[
-                    dict(range=[0, 40],  color='rgba(239,68,68,0.06)'),
-                    dict(range=[40, 70], color='rgba(245,158,11,0.06)'),
-                    dict(range=[70, 100],color='rgba(16,185,129,0.06)'),
-                ]
-            )
-        ))
-        fig_safety.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                                 height=280, margin=dict(t=40, b=10, l=30, r=30))
-        st.plotly_chart(fig_safety, use_container_width=True)
-
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="section-title">Manual Override Controls</div>', unsafe_allow_html=True)
-
-    mc1, mc2, mc3, mc4 = st.columns(4)
-    with mc1:
-        if st.button("FULL SPEED (100%)", use_container_width=True, key="speed_100"):
-            st.session_state.motor_speed = 100.0
-            st.session_state.remediation_active = False
-            st.session_state.remediation_log.append({
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'fault': 'Manual Override',
-                'action': 'Speed restored to 100%',
-                'health': '—', 'rul': '—', 'temp': '—', 'current': '—'
-            })
-            st.rerun()
-    with mc2:
-        if st.button("REDUCE TO 60%", use_container_width=True, key="speed_60"):
-            st.session_state.motor_speed = 60.0
-            st.session_state.remediation_active = True
-            st.session_state.remediation_log.append({
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'fault': 'Manual Override',
-                'action': 'Speed reduced to 60%',
-                'health': '—', 'rul': '—', 'temp': '—', 'current': '—'
-            })
-            st.rerun()
-    with mc3:
-        if st.button("REDUCE TO 30%", use_container_width=True, key="speed_30"):
-            st.session_state.motor_speed = 30.0
-            st.session_state.remediation_active = True
-            st.session_state.remediation_log.append({
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'fault': 'Manual Override',
-                'action': 'Emergency: Speed to 30%',
-                'health': '—', 'rul': '—', 'temp': '—', 'current': '—'
-            })
-            st.rerun()
-    with mc4:
-        if st.button("EMERGENCY STOP", use_container_width=True, key="speed_0"):
-            st.session_state.motor_speed = 0.0
-            st.session_state.remediation_active = True
-            st.session_state.remediation_log.append({
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'fault': 'EMERGENCY STOP',
-                'action': 'Motor completely stopped!',
-                'health': '—', 'rul': '—', 'temp': '—', 'current': '—'
-            })
-            st.rerun()
-
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-    # ── FIX: safe key access using .get() ──
-    if rem_active and st.session_state.remediation_log:
-        last = st.session_state.remediation_log[-1]
-        last_timestamp = last.get('timestamp', last.get('Timestamp', 'N/A'))
-        last_fault     = last.get('fault',     last.get('Fault',     'N/A'))
-        last_action    = last.get('action',    last.get('Actions',   'N/A'))
-        last_health    = last.get('health',    last.get('Health',    '—'))
-        st.markdown(f"""
-        <div style='background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);
-        border-radius:12px;padding:1rem 1.2rem;margin-bottom:1rem;'>
-            <div style='font-family:JetBrains Mono,monospace;font-size:0.7rem;
-            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:0.5rem;'>
-            ⚙️ Last Auto-Remediation Event
-            </div>
-            <div style='font-family:Space Grotesk,sans-serif;font-size:0.88rem;color:#a5b4fc;'>
-            Time: {last_timestamp}<br>
-            Fault: {last_fault}<br>
-            Action: {last_action}<br>
-            Health Score: {last_health}
-            </div>
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-title">Remediation Event History</div>', unsafe_allow_html=True)
-
-    if st.session_state.remediation_log:
-        rem_df = pd.DataFrame(st.session_state.remediation_log)
-        st.dataframe(rem_df.style.format(precision=2), use_container_width=True)
-
-        if len(st.session_state.remediation_log) > 1:
-            speed_history = []
-            for r in st.session_state.remediation_log:
-                action_val = r.get('action', r.get('Actions', ''))
-                time_val   = r.get('timestamp', r.get('Timestamp', ''))
-                spd = 100
-                if '30%' in action_val or 'Emergency' in action_val:
-                    spd = 30
-                elif '60%' in action_val:
-                    spd = 60
-                elif '100%' in action_val:
-                    spd = 100
-                elif 'stopped' in action_val:
-                    spd = 0
-                speed_history.append({'time': time_val, 'speed': spd, 'event': action_val})
-
-            sh_df = pd.DataFrame(speed_history)
-            fig_hist = go.Figure()
-            fig_hist.add_trace(go.Scatter(
-                x=sh_df['time'], y=sh_df['speed'],
-                mode='lines+markers',
-                line=dict(color='#6366f1', width=2),
-                marker=dict(size=10, color=[
-                    '#ef4444' if s <= 30 else '#f59e0b' if s <= 60 else '#10b981'
-                    for s in sh_df['speed']
-                ], line=dict(color='#ffffff', width=1)),
-                fill='tozeroy', fillcolor='rgba(99,102,241,0.07)',
-                text=sh_df['event'],
-                hovertemplate='<b>%{text}</b><br>Speed: %{y}%<br>Time: %{x}<extra></extra>'
-            ))
-            fig_hist.add_hline(y=30, line=dict(color='rgba(239,68,68,0.4)', dash='dot', width=1))
-            fig_hist.add_hline(y=60, line=dict(color='rgba(245,158,11,0.4)', dash='dot', width=1))
-            fig_hist.update_layout(
-                **PL, height=280,
-                title='Motor Speed History',
-                xaxis=make_axis(title='Time'),
-                yaxis=make_axis(range=[-5, 110], title='Speed (%)')
-            )
-            st.plotly_chart(fig_hist, use_container_width=True)
-
-        if st.button("CLEAR REMEDIATION LOG", use_container_width=True, key="clear_rem"):
-            st.session_state.remediation_log = []
-            st.session_state.motor_speed = 100.0
-            st.session_state.remediation_active = False
-            st.rerun()
-    else:
-        st.markdown("""
-        <div style='text-align:center;padding:3rem;background:#0d0d14;
-        border:1px solid rgba(99,102,241,0.15);border-radius:12px;
-        font-family:JetBrains Mono,monospace;font-size:0.75rem;
-        color:#374151;letter-spacing:2px;text-transform:uppercase;'>
-        No remediation events yet — Run a fault analysis in Live Prediction tab
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-title">How Auto-Remediation Works</div>', unsafe_allow_html=True)
-    st.markdown("""
-    <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px;'>
-        <div style='background:#0d0d14;border:1px solid rgba(99,102,241,0.15);
-        border-radius:12px;padding:1rem;text-align:center;'>
-            <div style='font-size:1.5rem;margin-bottom:8px;'>🔍</div>
-            <div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
-            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;'>
-            Step 1</div>
-            <div style='font-family:Space Grotesk,sans-serif;font-size:0.8rem;color:#8b8fa8;'>
-            AI detects fault from sensor data</div>
-        </div>
-        <div style='background:#0d0d14;border:1px solid rgba(99,102,241,0.15);
-        border-radius:12px;padding:1rem;text-align:center;'>
-            <div style='font-size:1.5rem;margin-bottom:8px;'>⚡</div>
-            <div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
-            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;'>
-            Step 2</div>
-            <div style='font-family:Space Grotesk,sans-serif;font-size:0.8rem;color:#8b8fa8;'>
-            n8n workflow triggers automatically</div>
-        </div>
-        <div style='background:#0d0d14;border:1px solid rgba(99,102,241,0.15);
-        border-radius:12px;padding:1rem;text-align:center;'>
-            <div style='font-size:1.5rem;margin-bottom:8px;'>📧</div>
-            <div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
-            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;'>
-            Step 3</div>
-            <div style='font-family:Space Grotesk,sans-serif;font-size:0.8rem;color:#8b8fa8;'>
-            Email + WhatsApp alert sent to team</div>
-        </div>
-        <div style='background:#0d0d14;border:1px solid rgba(99,102,241,0.15);
-        border-radius:12px;padding:1rem;text-align:center;'>
-            <div style='font-size:1.5rem;margin-bottom:8px;'>🔧</div>
-            <div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
-            color:#6366f1;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;'>
-            Step 4</div>
-            <div style='font-family:Space Grotesk,sans-serif;font-size:0.8rem;color:#8b8fa8;'>
-            Motor speed auto-reduced to safe level</div>
-        </div>
-    </div>""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════
-#  FOOTER
-# ══════════════════════════════════════════════════════════════
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-st.markdown("""
-<div class="footer-bar">
-MotorMind AI &nbsp;·&nbsp; Team PREDICT X &nbsp;·&nbsp; Random Forest + Gradient Boosting &nbsp;·&nbsp;
-Built with Streamlit & Plotly &nbsp;·&nbsp; Automated by n8n &nbsp;·&nbsp; Space Grotesk + JetBrains Mono
-</div>
-""", unsafe_allow_html=True)
+with open('motormind_metadata.json', 'w') as f:
+    json.dump(metadata, f, indent=2)
+
+print('\nFiles saved:')
+for fname in ['motormind_classifier.pkl', 'motormind_rul_model.pkl',
+              'motormind_anomaly_model.pkl', 'motormind_scaler.pkl',
+              'motormind_label_encoder.pkl', 'motormind_metadata.json']:
+    print(f'  ✓ {fname}')
+
+# ─── STEP 13: Production inference function ──────────────────────────
+def predict_motor_state(features_dict):
+    """Production inference — input dict of features, returns prediction."""
+    x = np.array([[features_dict[f] for f in FEATURE_COLS]])
+    pred_idx   = best_model.predict(x)[0]
+    pred_proba = best_model.predict_proba(x)[0]
+    pred_class = le.inverse_transform([pred_idx])[0]
+    confidence = float(pred_proba[pred_idx] * 100)
+    rul_hours  = float(max(0, rul_model.predict(x)[0]))
+    health     = compute_health_score(pd.Series(features_dict))
+    is_anom    = bool(iso_forest.predict(x)[0] == -1)
+
+    severity_map = {
+        'high load(controlled)':     ('CRITICAL', 'Reduce load. Inspect bearings.'),
+        'normal load(Uncontrolled)': ('WARNING',  'Stabilize control. Inspect within 48h.'),
+        'normal load(controlled)':   ('NOMINAL',  'Operating normally.'),
+        'no load':                   ('IDLE',     'Standby state.'),
+    }
+    severity, action = severity_map.get(pred_class, ('UNKNOWN','Check system'))
+
+    return {
+        'predicted_condition': pred_class,
+        'confidence':          round(confidence, 2),
+        'health_score':        health,
+        'rul_hours':           round(rul_hours, 1),
+        'is_anomaly':          is_anom,
+        'severity':            severity,
+        'recommended_action':  action,
+        'class_probabilities': {cls: round(float(p)*100, 2)
+                                for cls, p in zip(class_names, pred_proba)},
+        'timestamp':           datetime.now().isoformat(),
+    }
+
+# DEMO
+print('\n' + '=' * 70)
+print('INFERENCE DEMO — predicting on a test sample')
+print('=' * 70)
+sample = df.iloc[100][FEATURE_COLS].to_dict()
+actual = df.iloc[100]['condition']
+result = predict_motor_state(sample)
+print(f'\nActual class: {actual}')
+print(f'\nPrediction result:')
+print(json.dumps(result, indent=2))
+
+# ─── FINAL SUMMARY ───────────────────────────────────────────────────
+print('\n' + '=' * 70)
+print('  TRAINING PIPELINE COMPLETE — TEAM PREDICT X')
+print('=' * 70)
+print(f'  Best model:     {BEST_MODEL_NAME}')
+print(f'  Test accuracy:  {final_acc*100:.2f}%')
+print(f'  Test F1:        {final_f1*100:.2f}%')
+print(f'  RUL MAE:        {mae:.2f} hours')
+print(f'  RUL R^2:        {r2:.4f}')
+print(f'  Total features: {len(FEATURE_COLS)}')
+print(f'  Classes:        {len(class_names)}')
+print('\n  Models saved as .pkl — ready for Streamlit dashboard')
+print('=' * 70)
