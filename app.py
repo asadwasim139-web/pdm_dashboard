@@ -468,7 +468,7 @@ def axis3d(label):
 # ══════════════════════════════════════════════════════════════
 def send_alert_to_n8n(state, prob, live_health, rul_val, v, i, temp, vib):
     try:
-        webhook_url = "https://chaudhary0022.app.n8n.cloud/webhook-test/motormind-webhook"
+        webhook_url = "https://skyler01.app.n8n.cloud/webhook-test/motormind-webhook"
         payload = {
             "prediction": state,
             "confidence": round(float(prob), 1),
